@@ -16,8 +16,13 @@ const imageResult = ref(null);
 const imageLoading = ref(false);
 
 const videoFile = ref(null);
-const videoResult = ref(null);
+const videoRunning = ref(false);
+const videoFrame = ref("");
+const videoMetrics = ref(null);
 const videoLoading = ref(false);
+const videoPollingBusy = ref(false);
+const videoPollTimer = ref(null);
+const videoFinished = ref(false);
 
 const cameraRunning = ref(false);
 const cameraFrame = ref("");
@@ -72,7 +77,9 @@ function onImageFileChange(event) {
 
 function onVideoFileChange(event) {
   videoFile.value = event.target.files?.[0] || null;
-  videoResult.value = null;
+  videoFrame.value = "";
+  videoMetrics.value = null;
+  videoFinished.value = false;
 }
 
 async function runImageInference() {
@@ -112,13 +119,71 @@ async function runVideoInference() {
     form.append("conf", String(conf.value));
     form.append("device", selectedDevice.value);
 
-    const response = await api.post("/inference/video", form);
-    videoResult.value = response.data.data;
+    await api.post("/inference/video/start", form);
+    videoRunning.value = true;
+    videoFinished.value = false;
+    videoFrame.value = "";
+    videoMetrics.value = null;
+
+    if (videoPollTimer.value) {
+      clearInterval(videoPollTimer.value);
+    }
+
+    videoPollTimer.value = setInterval(fetchVideoFrame, 260);
+    await fetchVideoFrame();
   } catch (error) {
-    alert(`视频识别失败: ${error.message}`);
+    alert(`视频实时识别失败: ${error.message}`);
   } finally {
     videoLoading.value = false;
   }
+}
+
+async function fetchVideoFrame() {
+  if (!videoRunning.value || videoPollingBusy.value) {
+    return;
+  }
+
+  videoPollingBusy.value = true;
+  try {
+    const response = await api.get("/inference/video/frame");
+    const payload = response.data.data;
+    videoFrame.value = payload.frame;
+    videoMetrics.value = payload.metrics;
+
+    if (payload.metrics?.alarm) {
+      triggerAlarm(payload.alarm_audio_url);
+    }
+  } catch (error) {
+    const status = error.response?.status;
+    const message = error.response?.data?.message || error.message;
+
+    if (status === 409 && /结束|停止/.test(message)) {
+      videoFinished.value = true;
+      await stopVideoInference(true);
+      return;
+    }
+
+    console.error(error);
+  } finally {
+    videoPollingBusy.value = false;
+  }
+}
+
+async function stopVideoInference(silent = false) {
+  if (videoPollTimer.value) {
+    clearInterval(videoPollTimer.value);
+    videoPollTimer.value = null;
+  }
+
+  try {
+    await api.post("/inference/video/stop");
+  } catch (error) {
+    if (!silent) {
+      console.error(error);
+    }
+  }
+
+  videoRunning.value = false;
 }
 
 function triggerAlarm(audioUrl) {
@@ -198,7 +263,9 @@ async function stopCamera() {
 }
 
 onMounted(loadSystemInfo);
-onUnmounted(stopCamera);
+onUnmounted(async () => {
+  await Promise.allSettled([stopVideoInference(true), stopCamera()]);
+});
 </script>
 
 <template>
@@ -207,7 +274,7 @@ onUnmounted(stopCamera);
       <div>
         <h2 class="section-title">识别中心</h2>
         <p class="section-subtitle">
-          调用本地 YOLO 模型执行图片、视频和实时识别
+          调用本地 YOLO 模型执行图片、视频实时识别和摄像头实时识别
         </p>
       </div>
       <div class="metric-chip">当前计算设备: {{ deviceText }}</div>
@@ -270,98 +337,162 @@ onUnmounted(stopCamera);
     </div>
   </div>
 
-  <div class="grid gap-5 xl:grid-cols-2">
+  <div class="space-y-5">
     <section class="card-panel p-5">
-      <h3 class="section-title">图片识别</h3>
-      <p class="section-subtitle mt-1">
-        框选高置信度车辆，并输出前车距离/速度/TTC
-      </p>
+      <div class="grid gap-4 lg:grid-cols-[1.45fr_0.85fr] lg:items-start">
+        <div class="space-y-3">
+          <h3 class="section-title">图片识别</h3>
+          <p class="section-subtitle mt-1">
+            框选高置信度车辆，并输出前车距离/速度/TTC
+          </p>
+          <div
+            class="overflow-hidden rounded-2xl border border-[var(--line-soft)] bg-black/90"
+          >
+            <img
+              v-if="imageResult"
+              :src="imageResult.image"
+              alt="image-result"
+              class="w-full"
+            />
+            <div
+              v-else
+              class="flex h-[280px] items-center justify-center text-sm text-white/75"
+            >
+              尚未开始图片识别
+            </div>
+          </div>
+        </div>
 
-      <div class="mt-4 space-y-3">
-        <input
-          type="file"
-          accept="image/*"
-          @change="onImageFileChange"
-          class="field-input"
-        />
-        <button
-          class="btn-primary"
-          @click="runImageInference"
-          :disabled="imageLoading"
-        >
-          {{ imageLoading ? "识别中..." : "开始图片识别" }}
-        </button>
-      </div>
-
-      <div v-if="imageResult" class="mt-4 space-y-3">
-        <img
-          :src="imageResult.image"
-          alt="image-result"
-          class="w-full rounded-xl border border-[var(--line-soft)]"
-        />
-        <div class="flex flex-wrap gap-2">
-          <div class="metric-chip">
-            车辆数: {{ imageResult.metrics.vehicle_count }}
-          </div>
-          <div class="metric-chip">
-            前车距离: {{ imageResult.metrics.distance_m ?? "--" }} m
-          </div>
-          <div class="metric-chip">
-            相对速度: {{ imageResult.metrics.relative_speed_mps ?? "--" }} m/s
-          </div>
-          <div class="metric-chip">
-            碰撞时间: {{ imageResult.metrics.ttc_seconds ?? "--" }} s
-          </div>
-          <div class="metric-chip">
-            推理耗时: {{ imageResult.metrics.inference_ms }} ms
-          </div>
-          <div v-if="imageResult.metrics.alarm" class="alarm-chip">
-            TTC 小于 3 秒，触发报警
+        <div class="space-y-3 lg:pt-11">
+          <input
+            type="file"
+            accept="image/*"
+            @change="onImageFileChange"
+            class="field-input"
+          />
+          <div
+            class="rounded-2xl border border-[var(--line-soft)] bg-[#f8fbfa] p-4"
+          >
+            <div class="text-sm font-semibold text-[var(--text-strong)]">
+              识别操作
+            </div>
+            <div class="mt-2 text-sm text-[var(--text-muted)]">
+              先选择图片，再点击按钮开始识别。
+            </div>
+            <div class="mt-4 flex flex-col gap-2">
+              <button
+                class="btn-primary w-full"
+                @click="runImageInference"
+                :disabled="imageLoading"
+              >
+                {{ imageLoading ? "识别中..." : "开始图片识别" }}
+              </button>
+            </div>
+            <div class="mt-4 flex flex-wrap gap-2">
+              <div class="metric-chip">
+                车辆数: {{ imageResult?.metrics?.vehicle_count ?? "--" }}
+              </div>
+              <div class="metric-chip">
+                前车距离: {{ imageResult?.metrics?.distance_m ?? "--" }} m
+              </div>
+              <div class="metric-chip">
+                推理耗时: {{ imageResult?.metrics?.inference_ms ?? "--" }} ms
+              </div>
+              <div v-if="imageResult?.metrics?.alarm" class="alarm-chip">
+                TTC 小于 3 秒，触发报警
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </section>
 
     <section class="card-panel p-5">
-      <h3 class="section-title">视频识别</h3>
-      <p class="section-subtitle mt-1">
-        输出带标注视频，前车单独颜色框，统计报警帧
-      </p>
+      <div class="grid gap-4 lg:grid-cols-[1.45fr_0.85fr] lg:items-start">
+        <div class="space-y-3">
+          <h3 class="section-title">视频实时识别</h3>
+          <p class="section-subtitle mt-1">
+            上传视频后按帧实时识别并显示前车距离、相对速度与 TTC
+          </p>
+          <div
+            class="overflow-hidden rounded-2xl border border-[var(--line-soft)] bg-black/90"
+          >
+            <img
+              v-if="videoFrame"
+              :src="videoFrame"
+              alt="video-frame"
+              class="w-full"
+            />
+            <div
+              v-else
+              class="flex h-[280px] items-center justify-center text-sm text-white/75"
+            >
+              尚未开始视频实时识别
+            </div>
+          </div>
+        </div>
 
-      <div class="mt-4 space-y-3">
-        <input
-          type="file"
-          accept="video/*"
-          @change="onVideoFileChange"
-          class="field-input"
-        />
-        <button
-          class="btn-primary"
-          @click="runVideoInference"
-          :disabled="videoLoading"
-        >
-          {{ videoLoading ? "处理中..." : "开始视频识别" }}
-        </button>
-      </div>
-
-      <div v-if="videoResult" class="mt-4 space-y-3">
-        <video
-          :src="videoResult.video_url"
-          controls
-          class="w-full rounded-xl border border-[var(--line-soft)]"
-        />
-        <div class="flex flex-wrap gap-2">
-          <div class="metric-chip">
-            总帧数: {{ videoResult.summary.frame_count }}
-          </div>
-          <div class="metric-chip">
-            报警帧数: {{ videoResult.summary.alarm_frames }}
-          </div>
-          <div class="metric-chip">
-            平均置信度: {{ videoResult.summary.avg_confidence }}
-          </div>
-          <div class="metric-chip">
-            平均推理耗时: {{ videoResult.summary.avg_inference_ms }} ms
+        <div class="space-y-3 lg:pt-11">
+          <input
+            type="file"
+            accept="video/*"
+            @change="onVideoFileChange"
+            class="field-input"
+          />
+          <div
+            class="rounded-2xl border border-[var(--line-soft)] bg-[#f8fbfa] p-4"
+          >
+            <div class="text-sm font-semibold text-[var(--text-strong)]">
+              识别操作
+            </div>
+            <div class="mt-2 text-sm text-[var(--text-muted)]">
+              先选择视频，再启动实时识别。
+            </div>
+            <div class="mt-4 flex flex-col gap-2">
+              <button
+                class="btn-primary w-full"
+                @click="runVideoInference"
+                :disabled="videoLoading || videoRunning"
+              >
+                {{ videoLoading ? "启动中..." : "开始实时识别" }}
+              </button>
+              <button
+                class="btn-secondary w-full"
+                @click="stopVideoInference"
+                :disabled="!videoRunning"
+              >
+                停止
+              </button>
+            </div>
+            <div class="mt-4 flex flex-wrap gap-2">
+              <div class="metric-chip">
+                运行状态: {{ videoRunning ? "运行中" : "未运行" }}
+              </div>
+              <div class="metric-chip">
+                视频文件: {{ videoFile?.name || "未选择" }}
+              </div>
+              <div class="metric-chip">
+                车辆数量: {{ videoMetrics?.vehicle_count ?? "--" }}
+              </div>
+              <div class="metric-chip">
+                前车距离: {{ videoMetrics?.distance_m ?? "--" }} m
+              </div>
+              <div class="metric-chip">
+                相对速度: {{ videoMetrics?.relative_speed_mps ?? "--" }} m/s
+              </div>
+              <div class="metric-chip">
+                碰撞时间 TTC: {{ videoMetrics?.ttc_seconds ?? "--" }} s
+              </div>
+              <div class="metric-chip">
+                帧推理耗时: {{ videoMetrics?.inference_ms ?? "--" }} ms
+              </div>
+              <div v-if="videoFinished" class="metric-chip">
+                视频播放结束，已停止实时识别
+              </div>
+              <div v-if="videoMetrics?.alarm" class="alarm-chip">
+                警报: TTC 小于 3 秒，已触发 alert.wav
+              </div>
+            </div>
           </div>
         </div>
       </div>
