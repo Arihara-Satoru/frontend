@@ -8,12 +8,12 @@ const navItems = [
 </script>
 
 <template>
-  <div class="min-h-screen bg-[var(--bg-main)] text-[var(--ink-main)]">
+  <div class="min-h-screen w-full bg-[var(--bg-main)] text-[var(--ink-main)]">
     <header
       class="border-b border-[var(--line-soft)] bg-white/90 backdrop-blur"
     >
       <div
-        class="mx-auto flex max-w-7xl items-center justify-between px-4 py-4 lg:px-6"
+        class="mx-auto flex w-full max-w-none items-center justify-between px-4 py-4 sm:px-6 lg:px-8 xl:px-10"
       >
         <div>
           <h1 class="text-xl font-bold tracking-wide">YOLO 车辆智能识别系统</h1>
@@ -30,7 +30,7 @@ const navItems = [
     </header>
 
     <main
-      class="mx-auto grid max-w-7xl gap-5 px-4 pb-8 pt-5 lg:grid-cols-[250px_1fr] lg:px-6"
+      class="mx-auto grid w-full max-w-none gap-5 px-4 pb-8 pt-5 sm:px-6 lg:grid-cols-[260px_minmax(0,1fr)] lg:px-8 xl:px-10"
     >
       <aside class="card-panel p-4">
         <h2
@@ -51,7 +51,7 @@ const navItems = [
         </nav>
       </aside>
 
-      <section class="space-y-5">
+      <section class="min-w-0 space-y-5">
         <RouterView />
       </section>
     </main>

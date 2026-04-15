@@ -525,14 +525,14 @@ onMounted(async () => {
   </section>
 
   <section class="grid gap-5 xl:grid-cols-[300px_1fr]">
-    <aside class="card-panel p-4">
+    <aside class="card-panel p-4 overflow-auto">
       <div class="mb-3 flex items-center justify-between">
         <h3 class="section-title">帧列表</h3>
         <button class="btn-secondary px-3 py-1" @click="saveClassList">
           更新类别
         </button>
       </div>
-      <div class="max-h-[620px] space-y-2 overflow-auto">
+      <div class="max-h-[620px] space-y-2">
         <button
           v-for="(frame, index) in frames"
           :key="frame.frame_name"
@@ -564,8 +564,8 @@ onMounted(async () => {
 
     <div class="space-y-5">
       <section class="card-panel p-4">
+        <h3 class="section-title">手工标注</h3>
         <div class="flex flex-wrap items-center justify-between gap-2">
-          <h3 class="section-title">手工标注</h3>
           <div class="flex flex-wrap items-center gap-2">
             <label class="field-label mb-0">当前类别</label>
             <select

@@ -5,11 +5,7 @@ import * as echarts from "echarts";
 import api from "../utils/http";
 
 const modelList = ref([]);
-const selectedMap = reactive({
-  yolov8n: true,
-  yolov8s: true,
-  last: true,
-});
+const selectedMap = reactive({});
 const conf = ref(0.35);
 const selectedDevice = ref("cpu");
 const mediaFile = ref(null);
@@ -35,13 +31,30 @@ let pieChart;
 const chartFont =
   "Microsoft YaHei, PingFang SC, Noto Sans CJK SC, SimHei, sans-serif";
 
+function syncSelectedModels(models) {
+  const nextIds = new Set(models.map((item) => item.id));
+
+  for (const key of Object.keys(selectedMap)) {
+    if (!nextIds.has(key)) {
+      delete selectedMap[key];
+    }
+  }
+
+  for (const item of models) {
+    if (!(item.id in selectedMap)) {
+      selectedMap[item.id] = true;
+    }
+  }
+}
+
 async function loadSystemInfo() {
   try {
     const [modelsRes, deviceRes] = await Promise.all([
       api.get("/system/models"),
       api.get("/system/device"),
     ]);
-    modelList.value = modelsRes.data.data.filter((item) => item.exists);
+    modelList.value = (modelsRes.data.data || []).filter((item) => item.exists);
+    syncSelectedModels(modelList.value);
     selectedDevice.value = deviceRes.data.data.selected_device || "cpu";
   } catch (error) {
     alert(`加载模型信息失败: ${error.message}`);
@@ -53,7 +66,9 @@ function onFileChange(event) {
 }
 
 function getSelectedModels() {
-  return Object.keys(selectedMap).filter((name) => selectedMap[name]);
+  return modelList.value
+    .filter((item) => selectedMap[item.id])
+    .map((item) => item.id);
 }
 
 function initCharts() {
