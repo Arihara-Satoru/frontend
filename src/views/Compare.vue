@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onMounted, onUnmounted, reactive, ref } from "vue";
+import { nextTick, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import * as echarts from "echarts";
 
 import api from "../utils/http";
@@ -30,6 +30,79 @@ let pieChart;
 
 const chartFont =
   "Microsoft YaHei, PingFang SC, Noto Sans CJK SC, SimHei, sans-serif";
+const COMPARE_PAGE_STORAGE_KEY = "compare_page_state_v1";
+const preferredModelIds = ref([]);
+
+function readCompareCache() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(COMPARE_PAGE_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (error) {
+    console.warn("读取模型对比页缓存失败", error);
+    return null;
+  }
+}
+
+function writeCompareCache(payload) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      COMPARE_PAGE_STORAGE_KEY,
+      JSON.stringify(payload),
+    );
+  } catch (error) {
+    console.warn("写入模型对比页缓存失败", error);
+  }
+}
+
+function toBoundedNumber(value, fallback, min, max) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, numeric));
+}
+
+function applyCompareCache(cached) {
+  if (!cached || typeof cached !== "object") {
+    return;
+  }
+
+  conf.value = toBoundedNumber(cached.conf, conf.value, 0.1, 0.9);
+
+  if (
+    typeof cached.selectedDevice === "string" &&
+    cached.selectedDevice.trim()
+  ) {
+    selectedDevice.value = cached.selectedDevice.trim();
+  }
+
+  if (Array.isArray(cached.selectedModelIds)) {
+    preferredModelIds.value = cached.selectedModelIds
+      .map((item) => String(item).trim())
+      .filter(Boolean);
+  }
+}
+
+function persistCompareCache() {
+  writeCompareCache({
+    conf: Number(conf.value),
+    selectedDevice: selectedDevice.value,
+    selectedModelIds: getSelectedModels(),
+    savedAt: Date.now(),
+  });
+}
 
 function syncSelectedModels(models) {
   const nextIds = new Set(models.map((item) => item.id));
@@ -48,6 +121,8 @@ function syncSelectedModels(models) {
 }
 
 async function loadSystemInfo() {
+  const preferredDevice = selectedDevice.value;
+
   try {
     const [modelsRes, deviceRes] = await Promise.all([
       api.get("/system/models"),
@@ -55,7 +130,31 @@ async function loadSystemInfo() {
     ]);
     modelList.value = (modelsRes.data.data || []).filter((item) => item.exists);
     syncSelectedModels(modelList.value);
-    selectedDevice.value = deviceRes.data.data.selected_device || "cpu";
+
+    if (preferredModelIds.value.length > 0) {
+      const preferredSet = new Set(preferredModelIds.value);
+      let hitCount = 0;
+      for (const item of modelList.value) {
+        const checked = preferredSet.has(item.id);
+        selectedMap[item.id] = checked;
+        if (checked) {
+          hitCount += 1;
+        }
+      }
+
+      if (hitCount === 0) {
+        syncSelectedModels(modelList.value);
+      }
+    }
+
+    const autoDevice = deviceRes.data.data.selected_device || "cpu";
+    const supportedDevices = ["cpu", autoDevice];
+    if (String(deviceRes.data.data.selected_device || "").startsWith("cuda")) {
+      supportedDevices.push("cuda:0");
+    }
+    selectedDevice.value = supportedDevices.includes(preferredDevice)
+      ? preferredDevice
+      : autoDevice;
   } catch (error) {
     alert(`加载模型信息失败: ${error.message}`);
   }
@@ -298,7 +397,25 @@ async function compareModels() {
   }
 }
 
+watch(
+  [conf, selectedDevice],
+  () => {
+    persistCompareCache();
+  },
+  { deep: true },
+);
+
+watch(
+  selectedMap,
+  () => {
+    persistCompareCache();
+  },
+  { deep: true },
+);
+
 onMounted(async () => {
+  const cached = readCompareCache();
+  applyCompareCache(cached);
   await loadSystemInfo();
   await nextTick();
   initCharts();
@@ -306,6 +423,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  persistCompareCache();
   window.removeEventListener("resize", resizeAllCharts);
   speedChart?.dispose();
   countChart?.dispose();

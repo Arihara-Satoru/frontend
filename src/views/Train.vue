@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, reactive, ref } from "vue";
+import { onMounted, onUnmounted, reactive, ref, watch } from "vue";
 
 import api from "../utils/http";
 
@@ -17,6 +17,78 @@ const form = reactive({
   workers: 2,
   inner_iou_ratio: 0.7,
 });
+
+const TRAIN_FORM_STORAGE_KEY = "train_form_state_v1";
+const TRAIN_NUMERIC_FIELDS = [
+  "imgsz",
+  "epochs",
+  "batch",
+  "workers",
+  "inner_iou_ratio",
+];
+
+function readTrainFormCache() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(TRAIN_FORM_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (error) {
+    console.warn("读取训练参数缓存失败", error);
+    return null;
+  }
+}
+
+function writeTrainFormCache(payload) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      TRAIN_FORM_STORAGE_KEY,
+      JSON.stringify(payload),
+    );
+  } catch (error) {
+    console.warn("写入训练参数缓存失败", error);
+  }
+}
+
+function applyCachedTrainForm() {
+  const cached = readTrainFormCache();
+  if (!cached) {
+    return;
+  }
+
+  for (const [key, value] of Object.entries(cached)) {
+    if (!(key in form) || value === null || value === undefined) {
+      continue;
+    }
+
+    if (TRAIN_NUMERIC_FIELDS.includes(key)) {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) {
+        form[key] = numeric;
+      }
+      continue;
+    }
+
+    form[key] = String(value);
+  }
+}
+
+function persistTrainForm() {
+  writeTrainFormCache({
+    ...form,
+    savedAt: Date.now(),
+  });
+}
 
 const paramTips = {
   data: "训练数据集配置文件路径（YAML），需包含 train/val 路径和类别信息。",
@@ -78,8 +150,9 @@ async function loadTrainingDevices() {
     trainingDevices.value = [
       { value: currentValue, label: `当前设备 (${currentValue})` },
       { value: "cpu", label: "CPU" },
-    ].filter((item, index, arr) =>
-      arr.findIndex((x) => String(x.value) === String(item.value)) === index,
+    ].filter(
+      (item, index, arr) =>
+        arr.findIndex((x) => String(x.value) === String(item.value)) === index,
     );
   } finally {
     loadingTrainingDevices.value = false;
@@ -132,14 +205,24 @@ async function stopTraining() {
   }
 }
 
+watch(
+  form,
+  () => {
+    persistTrainForm();
+  },
+  { deep: true },
+);
+
 onMounted(async () => {
   await loadDefaults();
+  applyCachedTrainForm();
   await loadTrainingDevices();
   await refreshStatus();
   pollTimer = setInterval(refreshStatus, 2000);
 });
 
 onUnmounted(() => {
+  persistTrainForm();
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 
 import api from "../utils/http";
 
@@ -37,6 +37,77 @@ const availableModels = computed(() =>
   modelList.value.filter((item) => item.exists),
 );
 
+const HOME_INFERENCE_STORAGE_KEY = "home_inference_state_v1";
+
+function readHomeInferenceCache() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(HOME_INFERENCE_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (error) {
+    console.warn("读取推理页缓存失败", error);
+    return null;
+  }
+}
+
+function writeHomeInferenceCache(payload) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      HOME_INFERENCE_STORAGE_KEY,
+      JSON.stringify(payload),
+    );
+  } catch (error) {
+    console.warn("写入推理页缓存失败", error);
+  }
+}
+
+function toBoundedNumber(value, fallback, min, max) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(max, numeric));
+}
+
+function applyHomeInferenceCache(cached) {
+  if (!cached || typeof cached !== "object") {
+    return;
+  }
+
+  if (typeof cached.selectedModel === "string" && cached.selectedModel.trim()) {
+    selectedModel.value = cached.selectedModel.trim();
+  }
+
+  if (
+    typeof cached.selectedDevice === "string" &&
+    cached.selectedDevice.trim()
+  ) {
+    selectedDevice.value = cached.selectedDevice.trim();
+  }
+
+  conf.value = toBoundedNumber(cached.conf, conf.value, 0.1, 0.9);
+}
+
+function persistHomeInferenceCache() {
+  writeHomeInferenceCache({
+    selectedModel: selectedModel.value,
+    selectedDevice: selectedDevice.value,
+    conf: Number(conf.value),
+    savedAt: Date.now(),
+  });
+}
+
 const deviceText = computed(() => {
   if (!deviceInfo.value) return "未知设备";
   if (deviceInfo.value.selected_device?.startsWith("cuda")) {
@@ -47,6 +118,9 @@ const deviceText = computed(() => {
 
 async function loadSystemInfo() {
   loadingSystem.value = true;
+  const preferredModel = selectedModel.value;
+  const preferredDevice = selectedDevice.value;
+
   try {
     const [deviceRes, modelsRes] = await Promise.all([
       api.get("/system/device"),
@@ -56,12 +130,26 @@ async function loadSystemInfo() {
     deviceInfo.value = deviceRes.data.data;
     modelList.value = modelsRes.data.data;
 
-    selectedDevice.value = deviceInfo.value?.selected_device || "cpu";
+    const autoDevice = deviceInfo.value?.selected_device || "cpu";
+    const supportedDevices = ["cpu", autoDevice];
+    if (deviceInfo.value?.cuda_available) {
+      supportedDevices.push("cuda:0");
+    }
+
+    selectedDevice.value = supportedDevices.includes(preferredDevice)
+      ? preferredDevice
+      : autoDevice;
+
     if (
       availableModels.value.length > 0 &&
-      !availableModels.value.some((m) => m.id === selectedModel.value)
+      !availableModels.value.some((m) => m.id === preferredModel)
     ) {
       selectedModel.value = availableModels.value[0].id;
+    } else if (availableModels.value.length > 0) {
+      const matched = availableModels.value.find(
+        (m) => m.id === preferredModel,
+      );
+      selectedModel.value = matched?.id || availableModels.value[0].id;
     }
   } catch (error) {
     alert(`系统信息加载失败: ${error.message}`);
@@ -262,8 +350,22 @@ async function stopCamera() {
   cameraRunning.value = false;
 }
 
-onMounted(loadSystemInfo);
+watch(
+  [selectedModel, selectedDevice, conf],
+  () => {
+    persistHomeInferenceCache();
+  },
+  { deep: true },
+);
+
+onMounted(async () => {
+  const cached = readHomeInferenceCache();
+  applyHomeInferenceCache(cached);
+  await loadSystemInfo();
+});
+
 onUnmounted(async () => {
+  persistHomeInferenceCache();
   await Promise.allSettled([stopVideoInference(true), stopCamera()]);
 });
 </script>

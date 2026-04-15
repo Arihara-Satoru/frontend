@@ -1,9 +1,17 @@
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
 
 import api from "../utils/http";
 
 const videoFile = ref(null);
+const videoFiles = ref([]);
 const modelFile = ref(null);
 
 const classText = ref("car,bus,truck");
@@ -45,10 +53,370 @@ const autoLabelDevice = ref("cpu");
 
 const splitResult = ref(null);
 const autoLabelResult = ref(null);
+const sessionHistory = ref([]);
+const batchProgressTotal = ref(0);
+const batchProgressDone = ref(0);
+const batchCurrentVideoName = ref("");
+const batchExtractResults = ref([]);
 
 const currentFrame = computed(
   () => frames.value[currentFrameIndex.value] || null,
 );
+const selectedVideoCount = computed(() => videoFiles.value.length);
+const selectedVideoPreviewText = computed(() => {
+  if (videoFiles.value.length === 0) {
+    return "";
+  }
+
+  const names = videoFiles.value.map((file) => file.name);
+  if (names.length <= 3) {
+    return names.join("、");
+  }
+  return `${names.slice(0, 3).join("、")} 等 ${names.length} 个视频`;
+});
+
+const ANNOTATE_STORAGE_KEY = "annotate_page_state_v1";
+
+function readAnnotateCache() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const raw = window.localStorage.getItem(ANNOTATE_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (error) {
+    console.warn("读取标注页缓存失败", error);
+    return null;
+  }
+}
+
+function writeAnnotateCache(payload) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(ANNOTATE_STORAGE_KEY, JSON.stringify(payload));
+  } catch (error) {
+    console.warn("写入标注页缓存失败", error);
+  }
+}
+
+function toFiniteNumber(value, fallback, min, max) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return clamp(numeric, min, max);
+}
+
+function normalizeSessionHistoryEntry(entry) {
+  const nextSessionId = String(entry?.session_id || "").trim();
+  if (!nextSessionId) {
+    return null;
+  }
+
+  const nextClasses = Array.isArray(entry?.classes)
+    ? entry.classes.map((name) => String(name).trim()).filter(Boolean)
+    : [];
+
+  return {
+    session_id: nextSessionId,
+    video_name: String(entry?.video_name || nextSessionId),
+    frame_count: Math.max(0, Number(entry?.frame_count || 0)),
+    classes: nextClasses,
+    updated_at: String(entry?.updated_at || new Date().toISOString()),
+  };
+}
+
+function normalizeSessionHistory(rawHistory) {
+  if (!Array.isArray(rawHistory)) {
+    return [];
+  }
+
+  const seen = new Set();
+  const normalized = [];
+  for (const item of rawHistory) {
+    const nextItem = normalizeSessionHistoryEntry(item);
+    if (!nextItem || seen.has(nextItem.session_id)) {
+      continue;
+    }
+    seen.add(nextItem.session_id);
+    normalized.push(nextItem);
+  }
+
+  return normalized.slice(0, 60);
+}
+
+function upsertSessionHistory(entry) {
+  const normalized = normalizeSessionHistoryEntry(entry);
+  if (!normalized) {
+    return;
+  }
+
+  const nextHistory = [
+    normalized,
+    ...sessionHistory.value.filter(
+      (item) => item.session_id !== normalized.session_id,
+    ),
+  ];
+  sessionHistory.value = nextHistory.slice(0, 60);
+}
+
+function applyCachedSettings(cached) {
+  if (!cached || typeof cached !== "object") {
+    return;
+  }
+
+  if (typeof cached.classText === "string") {
+    classText.value = cached.classText;
+  }
+  frameStep.value = toFiniteNumber(cached.frameStep, frameStep.value, 1, 5000);
+  maxFrames.value = toFiniteNumber(cached.maxFrames, maxFrames.value, 1, 5000);
+  trainRatio.value = toFiniteNumber(
+    cached.trainRatio,
+    trainRatio.value,
+    0.5,
+    0.95,
+  );
+
+  if (typeof cached.datasetName === "string") {
+    datasetName.value = cached.datasetName;
+  }
+  if (typeof cached.selectedModel === "string" && cached.selectedModel.trim()) {
+    selectedModel.value = cached.selectedModel.trim();
+  }
+  if (
+    typeof cached.autoLabelDevice === "string" &&
+    cached.autoLabelDevice.trim()
+  ) {
+    autoLabelDevice.value = cached.autoLabelDevice.trim();
+  }
+  autoLabelConf.value = toFiniteNumber(
+    cached.autoLabelConf,
+    autoLabelConf.value,
+    0.05,
+    0.95,
+  );
+
+  if (cached.splitResult && typeof cached.splitResult === "object") {
+    splitResult.value = cached.splitResult;
+  }
+  if (cached.autoLabelResult && typeof cached.autoLabelResult === "object") {
+    autoLabelResult.value = cached.autoLabelResult;
+  }
+
+  sessionHistory.value = normalizeSessionHistory(cached.sessionHistory);
+}
+
+function persistAnnotateCache() {
+  writeAnnotateCache({
+    classText: classText.value,
+    frameStep: Number(frameStep.value),
+    maxFrames: Number(maxFrames.value),
+    trainRatio: Number(trainRatio.value),
+    datasetName: datasetName.value,
+    sessionId: sessionId.value,
+    currentFrameIndex: Number(currentFrameIndex.value),
+    selectedClassId: Number(selectedClassId.value),
+    selectedModel: selectedModel.value,
+    autoLabelConf: Number(autoLabelConf.value),
+    autoLabelDevice: autoLabelDevice.value,
+    splitResult: splitResult.value,
+    autoLabelResult: autoLabelResult.value,
+    sessionHistory: sessionHistory.value,
+    savedAt: Date.now(),
+  });
+}
+
+function resetSessionState() {
+  sessionId.value = "";
+  frames.value = [];
+  currentFrameIndex.value = 0;
+  currentBoxes.value = [];
+  classList.value = [];
+  selectedClassId.value = 0;
+  selectedBoxIndex.value = -1;
+  splitResult.value = null;
+  autoLabelResult.value = null;
+  unsaved.value = false;
+  imageElement.value = null;
+  clearInteractionState();
+  refreshCanvas();
+}
+
+async function loadSessionById(targetSessionId, options = {}) {
+  const normalizedTargetSessionId = String(targetSessionId || "").trim();
+  if (!normalizedTargetSessionId) {
+    throw new Error("会话ID不能为空");
+  }
+
+  const {
+    preferredFrameIndex = 0,
+    preferredClassId = 0,
+    fallbackSplitResult = null,
+    fallbackAutoLabelResult = null,
+  } = options;
+
+  sessionId.value = normalizedTargetSessionId;
+  const response = await api.get(
+    `/annotate/session/${normalizedTargetSessionId}/frames`,
+  );
+  const data = response.data.data || {};
+  const frameRecords = data.frames || [];
+
+  frames.value = frameRecords;
+  classList.value = data.classes || [];
+  if (classList.value.length > 0) {
+    classText.value = classList.value.join(",");
+  }
+
+  if (data.last_split && typeof data.last_split === "object") {
+    splitResult.value = data.last_split;
+  } else if (fallbackSplitResult && typeof fallbackSplitResult === "object") {
+    splitResult.value = fallbackSplitResult;
+  } else {
+    splitResult.value = null;
+  }
+
+  if (data.last_auto_label && typeof data.last_auto_label === "object") {
+    autoLabelResult.value = data.last_auto_label;
+  } else if (
+    fallbackAutoLabelResult &&
+    typeof fallbackAutoLabelResult === "object"
+  ) {
+    autoLabelResult.value = fallbackAutoLabelResult;
+  } else {
+    autoLabelResult.value = null;
+  }
+
+  currentFrameIndex.value = toFiniteNumber(
+    preferredFrameIndex,
+    0,
+    0,
+    Math.max(0, frameRecords.length - 1),
+  );
+  selectedClassId.value = toFiniteNumber(
+    preferredClassId,
+    0,
+    0,
+    Math.max(0, classList.value.length - 1),
+  );
+
+  const currentSessionHistory = sessionHistory.value.find(
+    (item) => item.session_id === normalizedTargetSessionId,
+  );
+
+  upsertSessionHistory({
+    session_id: normalizedTargetSessionId,
+    video_name:
+      data.video_name ||
+      currentSessionHistory?.video_name ||
+      normalizedTargetSessionId,
+    frame_count: Number(data.frame_count || frameRecords.length),
+    classes: data.classes || currentSessionHistory?.classes || [],
+    updated_at: String(data.updated_at || new Date().toISOString()),
+  });
+
+  if (frameRecords.length > 0) {
+    await loadCurrentFrame();
+  } else {
+    currentBoxes.value = [];
+    imageElement.value = null;
+    clearInteractionState();
+    refreshCanvas();
+  }
+
+  return data;
+}
+
+async function restoreSessionFromCache(cached) {
+  const restoredSessionId = String(cached?.sessionId || "").trim();
+  if (!restoredSessionId) {
+    return;
+  }
+
+  try {
+    await loadSessionById(restoredSessionId, {
+      preferredFrameIndex: cached?.currentFrameIndex,
+      preferredClassId: cached?.selectedClassId,
+      fallbackSplitResult: cached?.splitResult,
+      fallbackAutoLabelResult: cached?.autoLabelResult,
+    });
+  } catch (error) {
+    console.warn("恢复历史标注会话失败，已清除失效会话", error);
+    sessionHistory.value = sessionHistory.value.filter(
+      (item) => item.session_id !== restoredSessionId,
+    );
+    resetSessionState();
+  }
+}
+
+async function switchSession(targetSessionId) {
+  const normalizedTargetSessionId = String(targetSessionId || "").trim();
+  if (
+    !normalizedTargetSessionId ||
+    normalizedTargetSessionId === sessionId.value
+  ) {
+    return;
+  }
+
+  if (unsaved.value) {
+    const ok = window.confirm(
+      "当前帧有未保存标注，切换会话将丢失未保存内容，确定继续吗？",
+    );
+    if (!ok) {
+      return;
+    }
+  }
+
+  try {
+    await loadSessionById(normalizedTargetSessionId);
+  } catch (error) {
+    alert(`切换会话失败: ${error.message}`);
+  }
+}
+
+async function deleteSessionHistory(targetSessionId) {
+  const normalizedTargetSessionId = String(targetSessionId || "").trim();
+  if (!normalizedTargetSessionId) {
+    return;
+  }
+
+  const ok = window.confirm(
+    "确定删除这条历史会话记录吗？只会移除列表记录，不会删除后端数据。",
+  );
+  if (!ok) {
+    return;
+  }
+
+  sessionHistory.value = sessionHistory.value.filter(
+    (item) => item.session_id !== normalizedTargetSessionId,
+  );
+
+  if (normalizedTargetSessionId === sessionId.value) {
+    if (sessionHistory.value.length > 0) {
+      try {
+        await loadSessionById(sessionHistory.value[0].session_id, {
+          preferredFrameIndex: 0,
+          preferredClassId: 0,
+        });
+      } catch (error) {
+        console.warn("删除当前会话后切换到其它会话失败", error);
+        resetSessionState();
+      }
+    } else {
+      resetSessionState();
+    }
+  }
+
+  persistAnnotateCache();
+}
 
 function parseClassText(text) {
   const raw = text
@@ -59,7 +427,9 @@ function parseClassText(text) {
 }
 
 function onVideoFileChange(event) {
-  videoFile.value = event.target.files?.[0] || null;
+  const files = Array.from(event.target.files || []);
+  videoFiles.value = files;
+  videoFile.value = files[0] || null;
 }
 
 function onModelFileChange(event) {
@@ -465,10 +835,14 @@ function onWindowKeyDown(event) {
 
 async function loadModels() {
   try {
+    const preferredModel = selectedModel.value;
     const response = await api.get("/annotate/models");
     modelOptions.value = response.data.data || [];
     if (modelOptions.value.length > 0) {
-      selectedModel.value = modelOptions.value[0].id;
+      const matched = modelOptions.value.find(
+        (item) => item.id === preferredModel,
+      );
+      selectedModel.value = matched?.id || modelOptions.value[0].id;
     }
   } catch (error) {
     console.error(error);
@@ -494,7 +868,14 @@ async function uploadModel() {
 }
 
 async function createSessionAndExtract() {
-  if (!videoFile.value) {
+  const inputFiles =
+    videoFiles.value.length > 0
+      ? videoFiles.value
+      : videoFile.value
+        ? [videoFile.value]
+        : [];
+
+  if (inputFiles.length === 0) {
     alert("请先上传视频文件");
     return;
   }
@@ -506,48 +887,108 @@ async function createSessionAndExtract() {
   }
 
   loadingUpload.value = true;
+  loadingExtract.value = true;
   splitResult.value = null;
   autoLabelResult.value = null;
+  batchProgressTotal.value = inputFiles.length;
+  batchProgressDone.value = 0;
+  batchCurrentVideoName.value = "";
+  batchExtractResults.value = [];
 
-  try {
-    const createForm = new FormData();
-    createForm.append("file", videoFile.value);
-    createForm.append("classes", parsedClasses.join(","));
+  const successSessions = [];
 
-    const createRes = await api.post("/annotate/session/create", createForm);
-    sessionId.value = createRes.data.data.session_id;
-    classList.value = createRes.data.data.classes || parsedClasses;
-    selectedClassId.value = 0;
-  } catch (error) {
-    alert(`创建会话失败: ${error.message}`);
-    loadingUpload.value = false;
-    return;
-  }
+  for (const file of inputFiles) {
+    batchCurrentVideoName.value = file.name;
 
-  loadingUpload.value = false;
-  loadingExtract.value = true;
+    try {
+      const createForm = new FormData();
+      createForm.append("file", file);
+      createForm.append("classes", parsedClasses.join(","));
 
-  try {
-    const extractRes = await api.post("/annotate/session/extract", {
-      session_id: sessionId.value,
-      frame_step: Number(frameStep.value),
-      max_frames: Number(maxFrames.value),
-      start_frame: 0,
-    });
+      const createRes = await api.post("/annotate/session/create", createForm);
+      const createdData = createRes.data.data || {};
+      const createdSessionId = String(createdData.session_id || "").trim();
+      const createdClasses = createdData.classes || parsedClasses;
+      const createdVideoName = createdData.video_name || file.name;
 
-    frames.value = extractRes.data.data.frames || [];
-    classList.value = extractRes.data.data.classes || classList.value;
-    selectedClassId.value = 0;
-    currentFrameIndex.value = 0;
+      if (!createdSessionId) {
+        throw new Error("后端未返回有效 session_id");
+      }
 
-    if (frames.value.length > 0) {
-      await loadCurrentFrame();
+      const extractRes = await api.post("/annotate/session/extract", {
+        session_id: createdSessionId,
+        frame_step: Number(frameStep.value),
+        max_frames: Number(maxFrames.value),
+        start_frame: 0,
+      });
+
+      const extractData = extractRes.data.data || {};
+      const extractedFrames = extractData.frames || [];
+      const extractedClasses = extractData.classes || createdClasses;
+      const frameCount = Number(
+        extractData.frame_count || extractedFrames.length,
+      );
+
+      upsertSessionHistory({
+        session_id: createdSessionId,
+        video_name: createdVideoName,
+        frame_count: frameCount,
+        classes: extractedClasses,
+        updated_at: new Date().toISOString(),
+      });
+
+      successSessions.push(createdSessionId);
+      batchExtractResults.value.unshift({
+        video_name: file.name,
+        status: "success",
+        session_id: createdSessionId,
+        frame_count: frameCount,
+        message: `切帧成功，共 ${frameCount} 帧`,
+      });
+    } catch (error) {
+      const errorMessage =
+        error?.response?.data?.message || error.message || "未知错误";
+
+      batchExtractResults.value.unshift({
+        video_name: file.name,
+        status: "error",
+        message: errorMessage,
+      });
+    } finally {
+      batchProgressDone.value += 1;
     }
-  } catch (error) {
-    alert(`切帧失败: ${error.message}`);
-  } finally {
-    loadingExtract.value = false;
   }
+
+  batchExtractResults.value = batchExtractResults.value.slice(0, 60);
+
+  if (successSessions.length > 0) {
+    try {
+      const targetSessionId = successSessions[successSessions.length - 1];
+      await loadSessionById(targetSessionId, {
+        preferredFrameIndex: 0,
+        preferredClassId: 0,
+      });
+      selectedClassId.value = 0;
+    } catch (error) {
+      console.warn("批量切帧后加载会话失败", error);
+    }
+
+    const failedCount = inputFiles.length - successSessions.length;
+    if (failedCount > 0) {
+      alert(
+        `批量切帧完成：成功 ${successSessions.length} 个，失败 ${failedCount} 个。`,
+      );
+    } else {
+      alert(`批量切帧完成，共成功 ${successSessions.length} 个视频。`);
+    }
+  } else {
+    resetSessionState();
+    alert("批量切帧失败：所有视频均处理失败。请检查日志后重试。");
+  }
+
+  batchCurrentVideoName.value = "";
+  loadingUpload.value = false;
+  loadingExtract.value = false;
 }
 
 async function loadFrameAnnotation(frameName) {
@@ -600,6 +1041,76 @@ async function switchFrame(index) {
   await loadCurrentFrame();
 }
 
+async function deleteFrame(frameName, index) {
+  const normalizedFrameName = String(frameName || "").trim();
+  if (!sessionId.value || !normalizedFrameName) {
+    return;
+  }
+
+  if (unsaved.value) {
+    const ok = window.confirm(
+      "当前帧有未保存标注，删除图片会丢失这些内容，确定继续吗？",
+    );
+    if (!ok) {
+      return;
+    }
+  }
+
+  const ok = window.confirm(
+    `确定删除帧 ${normalizedFrameName} 吗？这会同时删除图片和对应标注。`,
+  );
+  if (!ok) {
+    return;
+  }
+
+  const originalCurrentIndex = currentFrameIndex.value;
+
+  try {
+    const response = await api.delete(
+      `/annotate/session/${sessionId.value}/frame/${normalizedFrameName}`,
+    );
+    const data = response.data.data || {};
+    frames.value = data.frames || [];
+    classList.value = data.classes || classList.value;
+    classText.value = classList.value.join(",");
+
+    if (frames.value.length === 0) {
+      resetSessionState();
+    } else {
+      let nextIndex = originalCurrentIndex;
+      if (index < originalCurrentIndex) {
+        nextIndex -= 1;
+      } else if (index === originalCurrentIndex) {
+        nextIndex = Math.min(originalCurrentIndex, frames.value.length - 1);
+      }
+
+      const boundedIndex = Math.max(
+        0,
+        Math.min(nextIndex, frames.value.length - 1),
+      );
+      currentFrameIndex.value = boundedIndex;
+      await loadCurrentFrame();
+    }
+
+    upsertSessionHistory({
+      session_id: sessionId.value,
+      video_name:
+        frames.value.length > 0
+          ? sessionHistory.value.find(
+              (item) => item.session_id === sessionId.value,
+            )?.video_name || sessionId.value
+          : sessionId.value,
+      frame_count: Number(data.frame_count || frames.value.length),
+      classes: data.classes || classList.value,
+      updated_at: new Date().toISOString(),
+    });
+
+    persistAnnotateCache();
+  } catch (error) {
+    alert(`删除帧失败: ${error.message}`);
+  }
+}
+
 async function saveCurrentFrameAnnotation() {
   if (!sessionId.value || !currentFrame.value) return;
 
@@ -650,6 +1161,7 @@ async function saveClassList() {
       },
     );
     classList.value = response.data.data.classes;
+    classText.value = classList.value.join(",");
     selectedClassId.value = Math.min(
       Number(selectedClassId.value || 0),
       Math.max(0, classList.value.length - 1),
@@ -685,11 +1197,15 @@ async function runAutoLabel() {
 
     autoLabelResult.value = response.data.data;
     classList.value = response.data.data.classes || classList.value;
+    classText.value = classList.value.join(",");
 
     const refreshRes = await api.get(
       `/annotate/session/${sessionId.value}/frames`,
     );
     frames.value = refreshRes.data.data.frames || frames.value;
+    splitResult.value = refreshRes.data.data.last_split || splitResult.value;
+    autoLabelResult.value =
+      refreshRes.data.data.last_auto_label || autoLabelResult.value;
     if (currentFrame.value) {
       await loadCurrentFrame();
     }
@@ -718,6 +1234,7 @@ async function splitDataset() {
     );
 
     splitResult.value = response.data.data;
+    datasetName.value = response.data.data.dataset_name || datasetName.value;
   } catch (error) {
     alert(`划分失败: ${error.message}`);
   } finally {
@@ -725,13 +1242,40 @@ async function splitDataset() {
   }
 }
 
+watch(
+  [
+    classText,
+    frameStep,
+    maxFrames,
+    trainRatio,
+    datasetName,
+    sessionId,
+    currentFrameIndex,
+    selectedClassId,
+    selectedModel,
+    autoLabelConf,
+    autoLabelDevice,
+    splitResult,
+    autoLabelResult,
+    sessionHistory,
+  ],
+  () => {
+    persistAnnotateCache();
+  },
+  { deep: true },
+);
+
 onMounted(async () => {
+  const cached = readAnnotateCache();
+  applyCachedSettings(cached);
   await loadModels();
+  await restoreSessionFromCache(cached);
   window.addEventListener("keydown", onWindowKeyDown);
   window.addEventListener("mouseup", onWindowMouseUp);
 });
 
 onBeforeUnmount(() => {
+  persistAnnotateCache();
   window.removeEventListener("keydown", onWindowKeyDown);
   window.removeEventListener("mouseup", onWindowMouseUp);
 });
@@ -753,8 +1297,12 @@ onBeforeUnmount(() => {
           class="field-input"
           type="file"
           accept="video/*"
+          multiple
           @change="onVideoFileChange"
         />
+        <p class="mt-1 text-xs text-[var(--ink-sub)]">
+          支持一次选择多个视频并批量切帧。
+        </p>
       </div>
 
       <div>
@@ -794,15 +1342,95 @@ onBeforeUnmount(() => {
           :disabled="loadingUpload || loadingExtract"
           @click="createSessionAndExtract"
         >
-          {{ loadingUpload || loadingExtract ? "处理中..." : "上传并切帧" }}
+          {{
+            loadingUpload || loadingExtract
+              ? "处理中..."
+              : selectedVideoCount > 1
+                ? "批量上传并切帧"
+                : "上传并切帧"
+          }}
         </button>
       </div>
+    </div>
+
+    <div
+      v-if="selectedVideoCount > 0"
+      class="mt-2 text-xs text-[var(--ink-sub)]"
+    >
+      已选择 {{ selectedVideoCount }} 个视频：{{ selectedVideoPreviewText }}
     </div>
 
     <div class="mt-3 flex flex-wrap gap-2 text-xs text-[var(--ink-sub)]">
       <span class="metric-chip">会话ID: {{ sessionId || "未创建" }}</span>
       <span class="metric-chip">总帧数: {{ frames.length }}</span>
       <span class="metric-chip">类别数: {{ classList.length }}</span>
+      <span v-if="batchProgressTotal > 0" class="metric-chip">
+        批量进度: {{ batchProgressDone }}/{{ batchProgressTotal }}
+      </span>
+      <span
+        v-if="(loadingUpload || loadingExtract) && batchCurrentVideoName"
+        class="metric-chip"
+      >
+        当前处理: {{ batchCurrentVideoName }}
+      </span>
+    </div>
+
+    <div v-if="sessionHistory.length > 0" class="mt-3">
+      <div class="text-xs font-semibold text-[var(--ink-sub)]">
+        历史会话（点击切换）
+      </div>
+      <div class="mt-2 flex flex-wrap gap-2">
+        <div
+          v-for="item in sessionHistory"
+          :key="item.session_id"
+          class="flex items-stretch overflow-hidden rounded-xl border border-[var(--line-soft)] bg-white"
+        >
+          <button
+            class="px-3 py-2 text-left text-xs transition"
+            :class="
+              item.session_id === sessionId
+                ? 'bg-emerald-50 text-[var(--brand)]'
+                : 'text-[var(--ink-sub)] hover:bg-emerald-50 hover:text-[var(--brand)]'
+            "
+            @click="switchSession(item.session_id)"
+          >
+            <div class="font-semibold">{{ item.video_name }}</div>
+            <div class="mt-0.5 opacity-80">{{ item.frame_count }} 帧</div>
+          </button>
+          <button
+            class="border-l border-[var(--line-soft)] px-3 text-xs text-rose-600 transition hover:bg-rose-50"
+            title="删除历史会话"
+            @click.stop="deleteSessionHistory(item.session_id)"
+          >
+            删除
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="batchExtractResults.length > 0" class="mt-3">
+      <div class="text-xs font-semibold text-[var(--ink-sub)]">
+        最近批量处理结果
+      </div>
+      <div class="mt-2 max-h-36 space-y-1 overflow-auto text-xs">
+        <div
+          v-for="(item, idx) in batchExtractResults"
+          :key="`${item.video_name}-${idx}-${item.session_id || 'none'}`"
+          class="rounded-lg border border-[var(--line-soft)] bg-white px-3 py-2"
+        >
+          <span class="font-semibold">{{ item.video_name }}</span>
+          <span
+            class="ml-2"
+            :class="
+              item.status === 'success' ? 'text-emerald-600' : 'text-rose-600'
+            "
+          >
+            {{
+              item.status === "success" ? item.message : `失败: ${item.message}`
+            }}
+          </span>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -815,10 +1443,10 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div class="max-h-[620px] space-y-2">
-        <button
+        <div
           v-for="(frame, index) in frames"
           :key="frame.frame_name"
-          class="w-full rounded-xl border p-2 text-left transition"
+          class="flex w-full cursor-pointer items-stretch overflow-hidden rounded-xl border text-left transition"
           :class="[
             index === currentFrameIndex
               ? 'border-[var(--brand)] bg-emerald-50'
@@ -826,21 +1454,30 @@ onBeforeUnmount(() => {
           ]"
           @click="switchFrame(index)"
         >
-          <img
-            :src="`${frame.image_url}?thumb=1`"
-            class="h-24 w-full rounded-lg object-cover"
-          />
-          <div class="mt-1 text-xs font-semibold">{{ frame.frame_name }}</div>
-          <div class="mt-1 text-[11px] text-[var(--ink-sub)]">
-            {{ frame.width }} x {{ frame.height }}
-            <span
-              class="ml-2"
-              :class="frame.has_label ? 'text-emerald-600' : 'text-slate-500'"
-            >
-              {{ frame.has_label ? "已标注" : "未标注" }}
-            </span>
+          <div class="flex-1 p-2">
+            <img
+              :src="`${frame.image_url}?thumb=1`"
+              class="h-24 w-full rounded-lg object-cover"
+            />
+            <div class="mt-1 text-xs font-semibold">{{ frame.frame_name }}</div>
+            <div class="mt-1 text-[11px] text-[var(--ink-sub)]">
+              {{ frame.width }} x {{ frame.height }}
+              <span
+                class="ml-2"
+                :class="frame.has_label ? 'text-emerald-600' : 'text-slate-500'"
+              >
+                {{ frame.has_label ? "已标注" : "未标注" }}
+              </span>
+            </div>
           </div>
-        </button>
+          <button
+            class="border-l border-[var(--line-soft)] px-3 text-xs text-rose-600 transition hover:bg-rose-50"
+            title="删除当前帧图片"
+            @click.stop="deleteFrame(frame.frame_name, index)"
+          >
+            删除
+          </button>
+        </div>
       </div>
     </aside>
 
