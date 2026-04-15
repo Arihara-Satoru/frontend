@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 
 import api from "../utils/http";
 
@@ -20,12 +20,17 @@ const frames = ref([]);
 const currentFrameIndex = ref(0);
 const currentBoxes = ref([]);
 const unsaved = ref(false);
+const selectedBoxIndex = ref(-1);
 
 const annotateCanvas = ref(null);
 const imageElement = ref(null);
 let drawing = false;
-let drawStart = { x: 0, y: 0 };
 let draftBox = null;
+let activeInteraction = null;
+
+const MIN_BOX_SIZE = 6;
+const HANDLE_SIZE = 5;
+const HANDLE_HIT_SIZE = 14;
 
 const loadingUpload = ref(false);
 const loadingExtract = ref(false);
@@ -75,6 +80,84 @@ function colorForClass(classId) {
   return palette[classId % palette.length];
 }
 
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function normalizeBox(box) {
+  return {
+    ...box,
+    x1: Math.min(box.x1, box.x2),
+    y1: Math.min(box.y1, box.y2),
+    x2: Math.max(box.x1, box.x2),
+    y2: Math.max(box.y1, box.y2),
+  };
+}
+
+function boxRect(box) {
+  const normalized = normalizeBox(box);
+  return {
+    x: normalized.x1,
+    y: normalized.y1,
+    w: normalized.x2 - normalized.x1,
+    h: normalized.y2 - normalized.y1,
+  };
+}
+
+function pointInBox(point, box) {
+  const normalized = normalizeBox(box);
+  return (
+    point.x >= normalized.x1 &&
+    point.x <= normalized.x2 &&
+    point.y >= normalized.y1 &&
+    point.y <= normalized.y2
+  );
+}
+
+function getBoxAtPoint(point) {
+  for (let index = currentBoxes.value.length - 1; index >= 0; index -= 1) {
+    if (pointInBox(point, currentBoxes.value[index])) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function getHandleAtPoint(point, box) {
+  const normalized = normalizeBox(box);
+  const handles = {
+    nw: { x: normalized.x1, y: normalized.y1 },
+    ne: { x: normalized.x2, y: normalized.y1 },
+    sw: { x: normalized.x1, y: normalized.y2 },
+    se: { x: normalized.x2, y: normalized.y2 },
+  };
+
+  for (const [name, handlePoint] of Object.entries(handles)) {
+    if (
+      Math.abs(point.x - handlePoint.x) <= HANDLE_HIT_SIZE &&
+      Math.abs(point.y - handlePoint.y) <= HANDLE_HIT_SIZE
+    ) {
+      return name;
+    }
+  }
+
+  return null;
+}
+
+function setSelectedBox(index) {
+  selectedBoxIndex.value = index;
+}
+
+function clearInteractionState() {
+  drawing = false;
+  draftBox = null;
+  activeInteraction = null;
+}
+
+function updateBoxAtIndex(index, nextBox) {
+  currentBoxes.value[index] = normalizeBox(nextBox);
+}
+
 function refreshCanvas() {
   const canvas = annotateCanvas.value;
   const image = imageElement.value;
@@ -87,19 +170,49 @@ function refreshCanvas() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
 
-  for (const box of currentBoxes.value) {
-    const color = colorForClass(Number(box.class_id || 0));
-    const x = Math.min(box.x1, box.x2);
-    const y = Math.min(box.y1, box.y2);
-    const w = Math.abs(box.x2 - box.x1);
-    const h = Math.abs(box.y2 - box.y1);
+  currentBoxes.value.forEach((box, index) => {
+    const normalized = normalizeBox(box);
+    const color = colorForClass(Number(normalized.class_id || 0));
+    const { x, y, w, h } = boxRect(normalized);
 
     ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = index === selectedBoxIndex.value ? 3 : 2;
     ctx.strokeRect(x, y, w, h);
 
+    if (index === selectedBoxIndex.value) {
+      ctx.save();
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x - 2, y - 2, w + 4, h + 4);
+      ctx.restore();
+
+      const handles = [
+        [x, y],
+        [x + w, y],
+        [x, y + h],
+        [x + w, y + h],
+      ];
+      for (const [handleX, handleY] of handles) {
+        ctx.fillStyle = "#ffffff";
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.rect(
+          handleX - HANDLE_SIZE,
+          handleY - HANDLE_SIZE,
+          HANDLE_SIZE * 2,
+          HANDLE_SIZE * 2,
+        );
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
     const className =
-      classList.value[Number(box.class_id)] || box.class_name || "class";
+      classList.value[Number(normalized.class_id)] ||
+      normalized.class_name ||
+      "class";
     const text = `${className}`;
     ctx.font = "16px Microsoft YaHei";
     const textWidth = ctx.measureText(text).width;
@@ -108,7 +221,7 @@ function refreshCanvas() {
     ctx.fillRect(x, Math.max(0, y - 22), textWidth + 12, 22);
     ctx.fillStyle = "#ffffff";
     ctx.fillText(text, x + 6, Math.max(16, y - 6));
-  }
+  });
 
   if (draftBox) {
     const x = Math.min(draftBox.x1, draftBox.x2);
@@ -136,67 +249,218 @@ function toCanvasPoint(event) {
 
 function onCanvasMouseDown(event) {
   if (!currentFrame.value) return;
-  drawing = true;
   const pt = toCanvasPoint(event);
-  drawStart = { ...pt };
+
+  if (selectedBoxIndex.value >= 0) {
+    const selectedBox = currentBoxes.value[selectedBoxIndex.value];
+    if (selectedBox) {
+      const selectedHandle = getHandleAtPoint(pt, selectedBox);
+      if (selectedHandle) {
+        activeInteraction = {
+          type: "resize",
+          index: selectedBoxIndex.value,
+          handle: selectedHandle,
+          startPoint: pt,
+          startBox: normalizeBox(selectedBox),
+        };
+        drawing = false;
+        draftBox = null;
+        refreshCanvas();
+        return;
+      }
+    }
+  }
+
+  const hitIndex = getBoxAtPoint(pt);
+  if (hitIndex >= 0) {
+    const hitBox = currentBoxes.value[hitIndex];
+
+    setSelectedBox(hitIndex);
+    activeInteraction = {
+      type: "move",
+      index: hitIndex,
+      startPoint: pt,
+      startBox: normalizeBox(hitBox),
+    };
+    drawing = false;
+    draftBox = null;
+    refreshCanvas();
+    return;
+  }
+
+  setSelectedBox(-1);
+  drawing = true;
   draftBox = { x1: pt.x, y1: pt.y, x2: pt.x, y2: pt.y };
+  activeInteraction = {
+    type: "draw",
+    startPoint: pt,
+  };
   refreshCanvas();
 }
 
 function onCanvasMouseMove(event) {
-  if (!drawing || !draftBox) return;
   const pt = toCanvasPoint(event);
-  draftBox.x2 = pt.x;
-  draftBox.y2 = pt.y;
-  refreshCanvas();
-}
 
-function onCanvasMouseUp(event) {
-  if (!drawing || !draftBox) return;
-  drawing = false;
-
-  const pt = toCanvasPoint(event);
-  draftBox.x2 = pt.x;
-  draftBox.y2 = pt.y;
-
-  const width = Math.abs(draftBox.x2 - draftBox.x1);
-  const height = Math.abs(draftBox.y2 - draftBox.y1);
-
-  if (width >= 6 && height >= 6) {
-    const classId = Number(selectedClassId.value || 0);
-    currentBoxes.value.push({
-      class_id: classId,
-      class_name: classList.value[classId] || `class_${classId}`,
-      x1: Math.min(draftBox.x1, draftBox.x2),
-      y1: Math.min(draftBox.y1, draftBox.y2),
-      x2: Math.max(draftBox.x1, draftBox.x2),
-      y2: Math.max(draftBox.y1, draftBox.y2),
-    });
-    unsaved.value = true;
+  if (activeInteraction?.type === "draw" && draftBox) {
+    draftBox.x2 = pt.x;
+    draftBox.y2 = pt.y;
+    refreshCanvas();
+    return;
   }
 
-  draftBox = null;
-  refreshCanvas();
-}
+  if (activeInteraction?.type === "move") {
+    const { index, startPoint, startBox } = activeInteraction;
+    const targetBox = currentBoxes.value[index];
+    if (!targetBox || !imageElement.value) return;
 
-function onCanvasMouseLeave() {
-  if (drawing) {
-    drawing = false;
-    draftBox = null;
+    const width = startBox.x2 - startBox.x1;
+    const height = startBox.y2 - startBox.y1;
+    const nextX1 = clamp(
+      startBox.x1 + (pt.x - startPoint.x),
+      0,
+      imageElement.value.width - width,
+    );
+    const nextY1 = clamp(
+      startBox.y1 + (pt.y - startPoint.y),
+      0,
+      imageElement.value.height - height,
+    );
+
+    updateBoxAtIndex(index, {
+      ...targetBox,
+      x1: nextX1,
+      y1: nextY1,
+      x2: nextX1 + width,
+      y2: nextY1 + height,
+    });
+    unsaved.value = true;
+    refreshCanvas();
+    return;
+  }
+
+  if (activeInteraction?.type === "resize") {
+    const { index, handle, startBox } = activeInteraction;
+    const targetBox = currentBoxes.value[index];
+    if (!targetBox || !imageElement.value) return;
+
+    const canvasWidth = imageElement.value.width;
+    const canvasHeight = imageElement.value.height;
+    const nextBox = { ...startBox };
+
+    if (handle === "nw") {
+      nextBox.x1 = clamp(pt.x, 0, nextBox.x2 - MIN_BOX_SIZE);
+      nextBox.y1 = clamp(pt.y, 0, nextBox.y2 - MIN_BOX_SIZE);
+    } else if (handle === "ne") {
+      nextBox.x2 = clamp(pt.x, nextBox.x1 + MIN_BOX_SIZE, canvasWidth);
+      nextBox.y1 = clamp(pt.y, 0, nextBox.y2 - MIN_BOX_SIZE);
+    } else if (handle === "sw") {
+      nextBox.x1 = clamp(pt.x, 0, nextBox.x2 - MIN_BOX_SIZE);
+      nextBox.y2 = clamp(pt.y, nextBox.y1 + MIN_BOX_SIZE, canvasHeight);
+    } else if (handle === "se") {
+      nextBox.x2 = clamp(pt.x, nextBox.x1 + MIN_BOX_SIZE, canvasWidth);
+      nextBox.y2 = clamp(pt.y, nextBox.y1 + MIN_BOX_SIZE, canvasHeight);
+    }
+
+    updateBoxAtIndex(index, nextBox);
+    unsaved.value = true;
     refreshCanvas();
   }
 }
 
+function onCanvasMouseUp(event) {
+  if (!activeInteraction) return;
+
+  const pt = toCanvasPoint(event);
+
+  if (activeInteraction.type === "draw" && draftBox) {
+    draftBox.x2 = pt.x;
+    draftBox.y2 = pt.y;
+
+    const nextBox = normalizeBox(draftBox);
+    const width = nextBox.x2 - nextBox.x1;
+    const height = nextBox.y2 - nextBox.y1;
+
+    if (width >= MIN_BOX_SIZE && height >= MIN_BOX_SIZE) {
+      const classId = Number(selectedClassId.value || 0);
+      currentBoxes.value.push({
+        class_id: classId,
+        class_name: classList.value[classId] || `class_${classId}`,
+        ...nextBox,
+      });
+      setSelectedBox(currentBoxes.value.length - 1);
+      unsaved.value = true;
+    }
+  }
+
+  if (activeInteraction.type !== "draw") {
+    unsaved.value = true;
+  }
+
+  clearInteractionState();
+  refreshCanvas();
+}
+
+function onCanvasMouseLeave() {
+  if (!activeInteraction) return;
+
+  if (activeInteraction.type === "draw") {
+    clearInteractionState();
+    refreshCanvas();
+  }
+}
+
+function onWindowMouseUp(event) {
+  if (!activeInteraction) return;
+
+  const canvas = annotateCanvas.value;
+  if (!canvas) return;
+
+  onCanvasMouseUp(event);
+}
+
 function clearBoxes() {
   currentBoxes.value = [];
+  setSelectedBox(-1);
   unsaved.value = true;
   refreshCanvas();
 }
 
 function undoBox() {
   currentBoxes.value.pop();
+  setSelectedBox(-1);
   unsaved.value = true;
   refreshCanvas();
+}
+
+function deleteSelectedBox() {
+  if (selectedBoxIndex.value < 0) return;
+
+  currentBoxes.value.splice(selectedBoxIndex.value, 1);
+  setSelectedBox(
+    Math.min(selectedBoxIndex.value, currentBoxes.value.length - 1),
+  );
+  unsaved.value = true;
+  refreshCanvas();
+}
+
+function onWindowKeyDown(event) {
+  const target = event.target;
+  const tagName = target?.tagName?.toLowerCase();
+  const isEditable =
+    target?.isContentEditable ||
+    tagName === "input" ||
+    tagName === "textarea" ||
+    tagName === "select";
+
+  if (isEditable) return;
+
+  if (
+    (event.key === "Delete" || event.key === "Backspace") &&
+    selectedBoxIndex.value >= 0
+  ) {
+    event.preventDefault();
+    deleteSelectedBox();
+  }
 }
 
 async function loadModels() {
@@ -291,7 +555,11 @@ async function loadFrameAnnotation(frameName) {
     `/annotate/session/${sessionId.value}/annotation/${frameName}`,
   );
   classList.value = response.data.data.classes || classList.value;
-  currentBoxes.value = response.data.data.boxes || [];
+  currentBoxes.value = (response.data.data.boxes || []).map((box) =>
+    normalizeBox(box),
+  );
+  setSelectedBox(-1);
+  clearInteractionState();
   selectedClassId.value = Math.min(
     Number(selectedClassId.value || 0),
     Math.max(0, classList.value.length - 1),
@@ -311,6 +579,13 @@ async function loadCurrentFrame() {
   };
   image.src = `${currentFrame.value.image_url}?t=${Date.now()}`;
   unsaved.value = false;
+}
+
+function getCanvasCursor() {
+  if (selectedBoxIndex.value < 0) return "crosshair";
+  if (activeInteraction?.type === "resize") return "nwse-resize";
+  if (activeInteraction?.type === "move") return "move";
+  return "default";
 }
 
 async function switchFrame(index) {
@@ -452,6 +727,13 @@ async function splitDataset() {
 
 onMounted(async () => {
   await loadModels();
+  window.addEventListener("keydown", onWindowKeyDown);
+  window.addEventListener("mouseup", onWindowMouseUp);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", onWindowKeyDown);
+  window.removeEventListener("mouseup", onWindowMouseUp);
 });
 </script>
 
@@ -593,7 +875,8 @@ onMounted(async () => {
         </div>
 
         <p class="mt-2 text-xs text-[var(--ink-sub)]">
-          鼠标左键拖动绘制框；切换帧前建议先保存。当前框数：{{
+          鼠标左键拖动绘制框；单击框可选中，拖动四角可调整大小，拖动框内部可移动；按
+          Delete 或 Backspace 删除选中框。切换帧前建议先保存。当前框数：{{
             currentBoxes.length
           }}。
         </p>
@@ -603,7 +886,8 @@ onMounted(async () => {
         >
           <canvas
             ref="annotateCanvas"
-            class="mx-auto max-h-[620px] max-w-full cursor-crosshair rounded-lg bg-black"
+            class="mx-auto max-h-[620px] max-w-full rounded-lg bg-black"
+            :style="{ cursor: getCanvasCursor() }"
             @mousedown="onCanvasMouseDown"
             @mousemove="onCanvasMouseMove"
             @mouseup="onCanvasMouseUp"
