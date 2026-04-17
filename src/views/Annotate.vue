@@ -17,6 +17,7 @@ const modelFile = ref(null);
 const classText = ref("car,bus,truck");
 const frameStep = ref(5);
 const maxFrames = ref(200);
+const cleanupSourceVideo = ref(true);
 const trainRatio = ref(0.8);
 const datasetName = ref("");
 
@@ -25,6 +26,7 @@ const classList = ref([]);
 const selectedClassId = ref(0);
 
 const frames = ref([]);
+const frameListVisibleCount = ref(0);
 const currentFrameIndex = ref(0);
 const currentBoxes = ref([]);
 const unsaved = ref(false);
@@ -39,12 +41,19 @@ let activeInteraction = null;
 const MIN_BOX_SIZE = 6;
 const HANDLE_SIZE = 5;
 const HANDLE_HIT_SIZE = 14;
+const FRAME_LIST_PAGE_SIZE = 240;
 
 const loadingUpload = ref(false);
 const loadingExtract = ref(false);
 const loadingSaveBox = ref(false);
 const loadingAutoLabel = ref(false);
 const loadingSplit = ref(false);
+const loadingAppendFrames = ref(false);
+const loadingAppendAllFrames = ref(false);
+const loadingClearFrames = ref(false);
+const loadingCleanupBackend = ref(false);
+const appendingSessionId = ref("");
+const appendedSourceSessionIds = ref([]);
 
 const modelOptions = ref([]);
 const selectedModel = ref("yolov8n");
@@ -63,6 +72,23 @@ const currentFrame = computed(
   () => frames.value[currentFrameIndex.value] || null,
 );
 const selectedVideoCount = computed(() => videoFiles.value.length);
+const appendedSourceSessionIdSet = computed(
+  () => new Set(appendedSourceSessionIds.value),
+);
+const appendableSessionCount = computed(
+  () =>
+    sessionHistory.value.filter(
+      (item) =>
+        item.session_id !== sessionId.value &&
+        !appendedSourceSessionIdSet.value.has(item.session_id),
+    ).length,
+);
+const visibleFrames = computed(() =>
+  frames.value.slice(0, frameListVisibleCount.value),
+);
+const canLoadMoreFrames = computed(
+  () => frameListVisibleCount.value < frames.value.length,
+);
 const selectedVideoPreviewText = computed(() => {
   if (videoFiles.value.length === 0) {
     return "";
@@ -76,6 +102,7 @@ const selectedVideoPreviewText = computed(() => {
 });
 
 const ANNOTATE_STORAGE_KEY = "annotate_page_state_v1";
+let cachePersistPaused = false;
 
 function readAnnotateCache() {
   if (typeof window === "undefined") {
@@ -104,6 +131,18 @@ function writeAnnotateCache(payload) {
     window.localStorage.setItem(ANNOTATE_STORAGE_KEY, JSON.stringify(payload));
   } catch (error) {
     console.warn("写入标注页缓存失败", error);
+  }
+}
+
+function clearAnnotateCache() {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.removeItem(ANNOTATE_STORAGE_KEY);
+  } catch (error) {
+    console.warn("清除标注页缓存失败", error);
   }
 }
 
@@ -168,6 +207,65 @@ function upsertSessionHistory(entry) {
   sessionHistory.value = nextHistory.slice(0, 60);
 }
 
+function normalizeSessionIdList(values) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+
+  const seen = new Set();
+  const normalized = [];
+  for (const value of values) {
+    const sessionIdText = String(value || "").trim();
+    if (!sessionIdText || seen.has(sessionIdText)) {
+      continue;
+    }
+    seen.add(sessionIdText);
+    normalized.push(sessionIdText);
+  }
+
+  return normalized;
+}
+
+function isSessionAlreadyAppended(sourceSessionId) {
+  const normalizedSourceSessionId = String(sourceSessionId || "").trim();
+  if (!normalizedSourceSessionId) {
+    return false;
+  }
+  return appendedSourceSessionIdSet.value.has(normalizedSourceSessionId);
+}
+
+function syncVisibleFrameCount() {
+  if (frames.value.length === 0) {
+    frameListVisibleCount.value = 0;
+    return;
+  }
+
+  const minVisible = Math.min(frames.value.length, currentFrameIndex.value + 1);
+  frameListVisibleCount.value = Math.min(
+    frames.value.length,
+    Math.max(FRAME_LIST_PAGE_SIZE, minVisible),
+  );
+}
+
+function ensureCurrentFrameVisible() {
+  const minVisible = Math.min(frames.value.length, currentFrameIndex.value + 1);
+  if (minVisible <= frameListVisibleCount.value) {
+    return;
+  }
+
+  frameListVisibleCount.value = Math.min(
+    frames.value.length,
+    Math.max(minVisible, frameListVisibleCount.value + FRAME_LIST_PAGE_SIZE),
+  );
+}
+
+function loadMoreFrames() {
+  frameListVisibleCount.value = Math.min(
+    frames.value.length,
+    frameListVisibleCount.value + FRAME_LIST_PAGE_SIZE,
+  );
+}
+
 function applyCachedSettings(cached) {
   if (!cached || typeof cached !== "object") {
     return;
@@ -177,7 +275,10 @@ function applyCachedSettings(cached) {
     classText.value = cached.classText;
   }
   frameStep.value = toFiniteNumber(cached.frameStep, frameStep.value, 1, 5000);
-  maxFrames.value = toFiniteNumber(cached.maxFrames, maxFrames.value, 1, 5000);
+  maxFrames.value = toFiniteNumber(cached.maxFrames, maxFrames.value, 0, 5000);
+  if (typeof cached.cleanupSourceVideo === "boolean") {
+    cleanupSourceVideo.value = cached.cleanupSourceVideo;
+  }
   trainRatio.value = toFiniteNumber(
     cached.trainRatio,
     trainRatio.value,
@@ -215,10 +316,15 @@ function applyCachedSettings(cached) {
 }
 
 function persistAnnotateCache() {
+  if (cachePersistPaused) {
+    return;
+  }
+
   writeAnnotateCache({
     classText: classText.value,
     frameStep: Number(frameStep.value),
     maxFrames: Number(maxFrames.value),
+    cleanupSourceVideo: Boolean(cleanupSourceVideo.value),
     trainRatio: Number(trainRatio.value),
     datasetName: datasetName.value,
     sessionId: sessionId.value,
@@ -234,6 +340,137 @@ function persistAnnotateCache() {
   });
 }
 
+async function clearAllLocalCache() {
+  const ok = window.confirm(
+    "确定一键清除本页全部本地缓存吗？这不会删除后端会话数据。",
+  );
+  if (!ok) {
+    return;
+  }
+
+  cachePersistPaused = true;
+  try {
+    videoFile.value = null;
+    videoFiles.value = [];
+    modelFile.value = null;
+
+    classText.value = "car,bus,truck";
+    frameStep.value = 5;
+    maxFrames.value = 200;
+    cleanupSourceVideo.value = true;
+    trainRatio.value = 0.8;
+    datasetName.value = "";
+
+    selectedModel.value = "yolov8n";
+    autoLabelConf.value = 0.25;
+    autoLabelDevice.value = "cpu";
+
+    sessionHistory.value = [];
+    batchProgressTotal.value = 0;
+    batchProgressDone.value = 0;
+    batchCurrentVideoName.value = "";
+    batchExtractResults.value = [];
+
+    resetSessionState();
+
+    await nextTick();
+    clearAnnotateCache();
+  } finally {
+    cachePersistPaused = false;
+  }
+
+  alert("本地缓存已清除，页面状态已重置");
+}
+
+function formatFileSize(sizeBytes) {
+  const size = Number(sizeBytes);
+  if (!Number.isFinite(size) || size <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let value = size;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  if (unitIndex === 0) {
+    return `${Math.round(value)} ${units[unitIndex]}`;
+  }
+  return `${value.toFixed(2)} ${units[unitIndex]}`;
+}
+
+async function clearBackendStorage() {
+  const keepSessionIds = sessionId.value ? [sessionId.value] : [];
+  const confirmMessage = sessionId.value
+    ? "确定一键清理后端缓存吗？将删除除当前会话外的所有历史会话目录（视频/帧/标注），且不可恢复。"
+    : "当前未选中会话，确定一键清理后端缓存吗？这会删除全部历史会话目录（视频/帧/标注），且不可恢复。";
+
+  const ok = window.confirm(confirmMessage);
+  if (!ok) {
+    return;
+  }
+
+  loadingCleanupBackend.value = true;
+  try {
+    const response = await api.post(
+      "/annotate/sessions/cleanup",
+      {
+        keep_session_ids: keepSessionIds,
+      },
+      {
+        timeout: 0,
+      },
+    );
+
+    const data = response.data.data || {};
+    const deletedSessionIds = Array.isArray(data.deleted_session_ids)
+      ? data.deleted_session_ids
+          .map((item) => String(item || "").trim())
+          .filter(Boolean)
+      : [];
+    const deletedSessionIdSet = new Set(deletedSessionIds);
+
+    if (deletedSessionIdSet.size > 0) {
+      sessionHistory.value = sessionHistory.value.filter(
+        (item) => !deletedSessionIdSet.has(item.session_id),
+      );
+    } else if (!sessionId.value) {
+      sessionHistory.value = [];
+    }
+
+    if (sessionId.value && deletedSessionIdSet.has(sessionId.value)) {
+      resetSessionState();
+    }
+
+    persistAnnotateCache();
+
+    const deletedCount = Number(data.deleted_count || 0);
+    const failedCount = Number(data.failed_count || 0);
+    const freedText =
+      data.freed_size_human || formatFileSize(Number(data.freed_bytes || 0));
+    const remainingText =
+      data.remaining_size_human ||
+      formatFileSize(Number(data.remaining_bytes || 0));
+
+    if (failedCount > 0) {
+      alert(
+        `清理完成：删除 ${deletedCount} 个会话，释放约 ${freedText}。另有 ${failedCount} 个会话删除失败，请稍后重试。`,
+      );
+    } else {
+      alert(
+        `清理完成：删除 ${deletedCount} 个会话，释放约 ${freedText}。当前后端会话占用约 ${remainingText}。`,
+      );
+    }
+  } catch (error) {
+    alert(`后端清理失败: ${error?.response?.data?.message || error.message}`);
+  } finally {
+    loadingCleanupBackend.value = false;
+  }
+}
+
 function resetSessionState() {
   sessionId.value = "";
   frames.value = [];
@@ -244,6 +481,7 @@ function resetSessionState() {
   selectedBoxIndex.value = -1;
   splitResult.value = null;
   autoLabelResult.value = null;
+  appendedSourceSessionIds.value = [];
   unsaved.value = false;
   imageElement.value = null;
   clearInteractionState();
@@ -266,6 +504,11 @@ async function loadSessionById(targetSessionId, options = {}) {
   sessionId.value = normalizedTargetSessionId;
   const response = await api.get(
     `/annotate/session/${normalizedTargetSessionId}/frames`,
+    {
+      params: {
+        include_size: 0,
+      },
+    },
   );
   const data = response.data.data || {};
   const frameRecords = data.frames || [];
@@ -294,6 +537,9 @@ async function loadSessionById(targetSessionId, options = {}) {
   } else {
     autoLabelResult.value = null;
   }
+  appendedSourceSessionIds.value = normalizeSessionIdList(
+    data.merged_source_sessions,
+  );
 
   currentFrameIndex.value = toFiniteNumber(
     preferredFrameIndex,
@@ -333,6 +579,19 @@ async function loadSessionById(targetSessionId, options = {}) {
   }
 
   return data;
+}
+
+async function reloadCurrentSessionFrames() {
+  if (!sessionId.value) {
+    return;
+  }
+
+  await loadSessionById(sessionId.value, {
+    preferredFrameIndex: currentFrameIndex.value,
+    preferredClassId: selectedClassId.value,
+    fallbackSplitResult: splitResult.value,
+    fallbackAutoLabelResult: autoLabelResult.value,
+  });
 }
 
 async function restoreSessionFromCache(cached) {
@@ -388,10 +647,26 @@ async function deleteSessionHistory(targetSessionId) {
     return;
   }
 
+  if (normalizedTargetSessionId === sessionId.value && unsaved.value) {
+    const keepGoing = window.confirm(
+      "当前会话存在未保存标注，删除会话会永久丢失这些数据，确定继续吗？",
+    );
+    if (!keepGoing) {
+      return;
+    }
+  }
+
   const ok = window.confirm(
-    "确定删除这条历史会话记录吗？只会移除列表记录，不会删除后端数据。",
+    "确定删除该历史会话吗？会同时删除后端会话目录、帧图片和标注文件，且不可恢复。",
   );
   if (!ok) {
+    return;
+  }
+
+  try {
+    await api.delete(`/annotate/session/${normalizedTargetSessionId}`);
+  } catch (error) {
+    alert(`删除会话失败: ${error?.response?.data?.message || error.message}`);
     return;
   }
 
@@ -416,6 +691,182 @@ async function deleteSessionHistory(targetSessionId) {
   }
 
   persistAnnotateCache();
+}
+
+async function appendSessionFrames(sourceSessionId) {
+  const normalizedSourceSessionId = String(sourceSessionId || "").trim();
+  if (!normalizedSourceSessionId) {
+    return;
+  }
+
+  if (!sessionId.value) {
+    alert("请先点击一个历史会话作为当前会话，再执行添加");
+    return;
+  }
+
+  if (normalizedSourceSessionId === sessionId.value) {
+    alert("当前会话无需重复添加");
+    return;
+  }
+
+  if (isSessionAlreadyAppended(normalizedSourceSessionId)) {
+    alert("该会话已经添加过，无需重复添加");
+    return;
+  }
+
+  if (unsaved.value) {
+    const ok = window.confirm(
+      "当前帧有未保存标注，执行添加会刷新帧列表，确定继续吗？",
+    );
+    if (!ok) {
+      return;
+    }
+  }
+
+  const ok = window.confirm("确定把该会话的帧追加到当前会话吗？");
+  if (!ok) {
+    return;
+  }
+
+  loadingAppendFrames.value = true;
+  appendingSessionId.value = normalizedSourceSessionId;
+
+  try {
+    const response = await api.post(
+      `/annotate/session/${sessionId.value}/append-frames`,
+      {
+        source_session_id: normalizedSourceSessionId,
+        include_frames: false,
+        include_size: false,
+      },
+    );
+
+    const data = response.data.data || {};
+    classList.value = data.classes || classList.value;
+    appendedSourceSessionIds.value = normalizeSessionIdList(
+      data.merged_source_sessions,
+    );
+    classText.value = classList.value.join(",");
+
+    try {
+      await reloadCurrentSessionFrames();
+    } catch (refreshError) {
+      console.warn("追加后刷新帧列表失败", refreshError);
+
+      upsertSessionHistory({
+        session_id: sessionId.value,
+        video_name:
+          sessionHistory.value.find(
+            (item) => item.session_id === sessionId.value,
+          )?.video_name || sessionId.value,
+        frame_count: Number(data.frame_count || frames.value.length),
+        classes: classList.value,
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    alert(`追加成功：新增 ${Number(data.appended_count || 0)} 帧`);
+  } catch (error) {
+    alert(`追加失败: ${error?.response?.data?.message || error.message}`);
+  } finally {
+    loadingAppendFrames.value = false;
+    appendingSessionId.value = "";
+  }
+}
+
+async function appendAllSessionsFrames() {
+  if (!sessionId.value) {
+    alert("请先选择一个当前会话");
+    return;
+  }
+
+  const candidateSessions = sessionHistory.value.filter(
+    (item) =>
+      item.session_id !== sessionId.value &&
+      !isSessionAlreadyAppended(item.session_id),
+  );
+
+  if (candidateSessions.length === 0) {
+    alert("没有可添加的历史会话（可能都已添加过）");
+    return;
+  }
+
+  if (unsaved.value) {
+    const keepGoing = window.confirm(
+      "当前帧有未保存标注，一键添加会刷新帧列表，确定继续吗？",
+    );
+    if (!keepGoing) {
+      return;
+    }
+  }
+
+  const ok = window.confirm(
+    `确定一键添加 ${candidateSessions.length} 个历史会话的帧到当前会话吗？`,
+  );
+  if (!ok) {
+    return;
+  }
+
+  loadingAppendAllFrames.value = true;
+
+  let successCount = 0;
+  let failedCount = 0;
+  let latestFrameCount = Number(frames.value.length || 0);
+
+  try {
+    for (const item of candidateSessions) {
+      appendingSessionId.value = item.session_id;
+      try {
+        const response = await api.post(
+          `/annotate/session/${sessionId.value}/append-frames`,
+          {
+            source_session_id: item.session_id,
+            include_frames: false,
+            include_size: false,
+          },
+        );
+
+        const data = response.data.data || {};
+        classList.value = data.classes || classList.value;
+        appendedSourceSessionIds.value = normalizeSessionIdList(
+          data.merged_source_sessions,
+        );
+        classText.value = classList.value.join(",");
+        latestFrameCount = Number(data.frame_count || latestFrameCount);
+        successCount += 1;
+      } catch (error) {
+        failedCount += 1;
+      }
+    }
+
+    if (successCount > 0) {
+      try {
+        await reloadCurrentSessionFrames();
+      } catch (refreshError) {
+        console.warn("一键追加后刷新帧列表失败", refreshError);
+
+        upsertSessionHistory({
+          session_id: sessionId.value,
+          video_name:
+            sessionHistory.value.find(
+              (item) => item.session_id === sessionId.value,
+            )?.video_name || sessionId.value,
+          frame_count: latestFrameCount,
+          classes: classList.value,
+          updated_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    if (failedCount > 0) {
+      alert(`一键添加完成：成功 ${successCount} 个，失败 ${failedCount} 个。`);
+    } else {
+      alert(`一键添加完成，共成功添加 ${successCount} 个会话。`);
+    }
+  } finally {
+    loadingAppendAllFrames.value = false;
+    appendingSessionId.value = "";
+  }
 }
 
 function parseClassText(text) {
@@ -905,7 +1356,9 @@ async function createSessionAndExtract() {
       createForm.append("file", file);
       createForm.append("classes", parsedClasses.join(","));
 
-      const createRes = await api.post("/annotate/session/create", createForm);
+      const createRes = await api.post("/annotate/session/create", createForm, {
+        timeout: 0,
+      });
       const createdData = createRes.data.data || {};
       const createdSessionId = String(createdData.session_id || "").trim();
       const createdClasses = createdData.classes || parsedClasses;
@@ -915,12 +1368,19 @@ async function createSessionAndExtract() {
         throw new Error("后端未返回有效 session_id");
       }
 
-      const extractRes = await api.post("/annotate/session/extract", {
-        session_id: createdSessionId,
-        frame_step: Number(frameStep.value),
-        max_frames: Number(maxFrames.value),
-        start_frame: 0,
-      });
+      const extractRes = await api.post(
+        "/annotate/session/extract",
+        {
+          session_id: createdSessionId,
+          frame_step: Number(frameStep.value),
+          max_frames: Number(maxFrames.value),
+          start_frame: 0,
+          cleanup_source_video: Boolean(cleanupSourceVideo.value),
+        },
+        {
+          timeout: 0,
+        },
+      );
 
       const extractData = extractRes.data.data || {};
       const extractedFrames = extractData.frames || [];
@@ -928,6 +1388,7 @@ async function createSessionAndExtract() {
       const frameCount = Number(
         extractData.frame_count || extractedFrames.length,
       );
+      const sourceVideoDeleted = Boolean(extractData.source_video_deleted);
 
       upsertSessionHistory({
         session_id: createdSessionId,
@@ -943,7 +1404,9 @@ async function createSessionAndExtract() {
         status: "success",
         session_id: createdSessionId,
         frame_count: frameCount,
-        message: `切帧成功，共 ${frameCount} 帧`,
+        message: sourceVideoDeleted
+          ? `切帧成功，共 ${frameCount} 帧（已清理源视频）`
+          : `切帧成功，共 ${frameCount} 帧`,
       });
     } catch (error) {
       const errorMessage =
@@ -996,9 +1459,22 @@ async function loadFrameAnnotation(frameName) {
     `/annotate/session/${sessionId.value}/annotation/${frameName}`,
   );
   classList.value = response.data.data.classes || classList.value;
+  const imageWidth = Number(response.data.data.image_width || 0);
+  const imageHeight = Number(response.data.data.image_height || 0);
   currentBoxes.value = (response.data.data.boxes || []).map((box) =>
     normalizeBox(box),
   );
+
+  if (imageWidth > 0 && imageHeight > 0) {
+    const targetFrame = frames.value.find(
+      (frame) => frame.frame_name === frameName,
+    );
+    if (targetFrame) {
+      targetFrame.width = imageWidth;
+      targetFrame.height = imageHeight;
+    }
+  }
+
   setSelectedBox(-1);
   clearInteractionState();
   selectedClassId.value = Math.min(
@@ -1038,6 +1514,7 @@ async function switchFrame(index) {
   }
 
   currentFrameIndex.value = index;
+  ensureCurrentFrameVisible();
   await loadCurrentFrame();
 }
 
@@ -1108,6 +1585,72 @@ async function deleteFrame(frameName, index) {
     persistAnnotateCache();
   } catch (error) {
     alert(`删除帧失败: ${error.message}`);
+  }
+}
+
+async function clearFrameList() {
+  if (!sessionId.value) {
+    alert("请先创建或切换到一个会话");
+    return;
+  }
+
+  if (frames.value.length === 0) {
+    alert("当前帧列表已为空");
+    return;
+  }
+
+  if (unsaved.value) {
+    const ok = window.confirm(
+      "当前帧有未保存标注，清空列表将丢失这些内容，确定继续吗？",
+    );
+    if (!ok) {
+      return;
+    }
+  }
+
+  const ok = window.confirm("确定清空当前会话的全部帧列表吗？");
+  if (!ok) {
+    return;
+  }
+
+  loadingClearFrames.value = true;
+
+  try {
+    const response = await api.delete(
+      `/annotate/session/${sessionId.value}/frames`,
+    );
+    const data = response.data.data || {};
+
+    frames.value = data.frames || [];
+    classList.value = data.classes || classList.value;
+    classText.value = classList.value.join(",");
+
+    currentFrameIndex.value = 0;
+    currentBoxes.value = [];
+    selectedBoxIndex.value = -1;
+    imageElement.value = null;
+    splitResult.value = null;
+    autoLabelResult.value = null;
+    unsaved.value = false;
+    clearInteractionState();
+    refreshCanvas();
+
+    upsertSessionHistory({
+      session_id: sessionId.value,
+      video_name:
+        sessionHistory.value.find((item) => item.session_id === sessionId.value)
+          ?.video_name || sessionId.value,
+      frame_count: Number(data.frame_count || 0),
+      classes: classList.value,
+      updated_at: new Date().toISOString(),
+    });
+
+    persistAnnotateCache();
+    alert("当前会话帧列表已清空");
+  } catch (error) {
+    alert(`清空失败: ${error?.response?.data?.message || error.message}`);
+  } finally {
+    loadingClearFrames.value = false;
   }
 }
 
@@ -1193,6 +1736,9 @@ async function runAutoLabel() {
         conf: Number(autoLabelConf.value),
         device: autoLabelDevice.value,
       },
+      {
+        timeout: 0,
+      },
     );
 
     autoLabelResult.value = response.data.data;
@@ -1201,6 +1747,11 @@ async function runAutoLabel() {
 
     const refreshRes = await api.get(
       `/annotate/session/${sessionId.value}/frames`,
+      {
+        params: {
+          include_size: 0,
+        },
+      },
     );
     frames.value = refreshRes.data.data.frames || frames.value;
     splitResult.value = refreshRes.data.data.last_split || splitResult.value;
@@ -1231,6 +1782,9 @@ async function splitDataset() {
         train_ratio: Number(trainRatio.value),
         seed: 42,
       },
+      {
+        timeout: 0,
+      },
     );
 
     splitResult.value = response.data.data;
@@ -1242,11 +1796,20 @@ async function splitDataset() {
   }
 }
 
+watch(frames, () => {
+  syncVisibleFrameCount();
+});
+
+watch(currentFrameIndex, () => {
+  ensureCurrentFrameVisible();
+});
+
 watch(
   [
     classText,
     frameStep,
     maxFrames,
+    cleanupSourceVideo,
     trainRatio,
     datasetName,
     sessionId,
@@ -1316,14 +1879,24 @@ onBeforeUnmount(() => {
       </div>
 
       <div>
-        <label class="field-label">最多提取帧数</label>
+        <label class="field-label">最多提取帧数（0代表无上限）</label>
         <input
           v-model.number="maxFrames"
           class="field-input"
           type="number"
-          min="10"
+          min="0"
           max="5000"
         />
+        <label
+          class="mt-2 inline-flex items-center gap-2 text-xs text-[var(--ink-sub)]"
+        >
+          <input
+            v-model="cleanupSourceVideo"
+            class="h-3.5 w-3.5 accent-emerald-600"
+            type="checkbox"
+          />
+          <span>切帧成功后自动删除源视频（推荐，节省磁盘空间）</span>
+        </label>
       </div>
 
       <div class="md:col-span-3">
@@ -1375,9 +1948,49 @@ onBeforeUnmount(() => {
       </span>
     </div>
 
+    <div class="mt-2 flex flex-wrap justify-end gap-2">
+      <button
+        class="btn-secondary px-3 py-1 text-xs text-rose-600"
+        @click="clearAllLocalCache"
+      >
+        一键清除本地缓存
+      </button>
+      <button
+        class="btn-secondary px-3 py-1 text-xs text-amber-700 disabled:cursor-not-allowed disabled:opacity-50"
+        :disabled="loadingCleanupBackend"
+        @click="clearBackendStorage"
+      >
+        {{ loadingCleanupBackend ? "清理中..." : "一键清理后端缓存" }}
+      </button>
+    </div>
+    <div class="mt-1 text-right text-[11px] text-[var(--ink-sub)]">
+      后端清理会删除会话目录中的源视频、切帧和标注文件；若当前已选择会话，将默认保留当前会话。
+    </div>
+
     <div v-if="sessionHistory.length > 0" class="mt-3">
-      <div class="text-xs font-semibold text-[var(--ink-sub)]">
-        历史会话（点击切换）
+      <div class="flex items-center justify-between gap-2">
+        <div class="text-xs font-semibold text-[var(--ink-sub)]">
+          历史会话（点击切换）
+        </div>
+        <button
+          class="btn-secondary px-3 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="
+            !sessionId ||
+            appendableSessionCount === 0 ||
+            loadingAppendFrames ||
+            loadingAppendAllFrames
+          "
+          @click="appendAllSessionsFrames"
+        >
+          {{
+            loadingAppendAllFrames
+              ? "添加中..."
+              : `一键添加(${appendableSessionCount})`
+          }}
+        </button>
+      </div>
+      <div class="mt-1 text-[11px] text-[var(--ink-sub)]">
+        先点击一个会话作为当前会话，再点其他会话“添加”可把该批次帧追加到当前会话；已添加过的会话会自动禁用。
       </div>
       <div class="mt-2 flex flex-wrap gap-2">
         <div
@@ -1398,8 +2011,34 @@ onBeforeUnmount(() => {
             <div class="mt-0.5 opacity-80">{{ item.frame_count }} 帧</div>
           </button>
           <button
+            class="border-l border-[var(--line-soft)] px-3 text-xs text-emerald-700 transition hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+            :title="
+              item.session_id === sessionId
+                ? '当前会话不可重复添加'
+                : isSessionAlreadyAppended(item.session_id)
+                  ? '该会话已添加过'
+                  : '添加该会话帧到当前会话'
+            "
+            :disabled="
+              loadingAppendFrames ||
+              loadingAppendAllFrames ||
+              !sessionId ||
+              item.session_id === sessionId ||
+              isSessionAlreadyAppended(item.session_id)
+            "
+            @click.stop="appendSessionFrames(item.session_id)"
+          >
+            {{
+              isSessionAlreadyAppended(item.session_id)
+                ? "已添加"
+                : loadingAppendFrames && appendingSessionId === item.session_id
+                  ? "添加中"
+                  : "添加"
+            }}
+          </button>
+          <button
             class="border-l border-[var(--line-soft)] px-3 text-xs text-rose-600 transition hover:bg-rose-50"
-            title="删除历史会话"
+            title="删除历史会话（含后端数据）"
             @click.stop="deleteSessionHistory(item.session_id)"
           >
             删除
@@ -1435,16 +2074,38 @@ onBeforeUnmount(() => {
   </section>
 
   <section class="grid gap-5 xl:grid-cols-[300px_1fr]">
-    <aside class="card-panel p-4 overflow-auto">
+    <aside class="card-panel p-4 overflow-hidden">
       <div class="mb-3 flex items-center justify-between">
         <h3 class="section-title">帧列表</h3>
-        <button class="btn-secondary px-3 py-1" @click="saveClassList">
-          更新类别
+        <div class="flex items-center gap-2">
+          <button class="btn-secondary px-3 py-1" @click="saveClassList">
+            更新类别
+          </button>
+          <button
+            class="btn-secondary px-3 py-1 text-rose-600 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="loadingClearFrames || !sessionId || frames.length === 0"
+            @click="clearFrameList"
+          >
+            {{ loadingClearFrames ? "清空中..." : "清空列表" }}
+          </button>
+        </div>
+      </div>
+      <div
+        v-if="frames.length > 0"
+        class="mb-2 flex items-center justify-between text-xs text-[var(--ink-sub)]"
+      >
+        <span>已显示 {{ visibleFrames.length }} / {{ frames.length }} 帧</span>
+        <button
+          v-if="canLoadMoreFrames"
+          class="btn-secondary px-2 py-1"
+          @click="loadMoreFrames"
+        >
+          加载更多
         </button>
       </div>
-      <div class="max-h-[620px] space-y-2">
+      <div class="max-h-[1060px] space-y-2 overflow-auto pr-1">
         <div
-          v-for="(frame, index) in frames"
+          v-for="(frame, index) in visibleFrames"
           :key="frame.frame_name"
           class="flex w-full cursor-pointer items-stretch overflow-hidden rounded-xl border text-left transition"
           :class="[
@@ -1458,10 +2119,12 @@ onBeforeUnmount(() => {
             <img
               :src="`${frame.image_url}?thumb=1`"
               class="h-24 w-full rounded-lg object-cover"
+              loading="lazy"
+              decoding="async"
             />
             <div class="mt-1 text-xs font-semibold">{{ frame.frame_name }}</div>
             <div class="mt-1 text-[11px] text-[var(--ink-sub)]">
-              {{ frame.width }} x {{ frame.height }}
+              {{ frame.width || "--" }} x {{ frame.height || "--" }}
               <span
                 class="ml-2"
                 :class="frame.has_label ? 'text-emerald-600' : 'text-slate-500'"

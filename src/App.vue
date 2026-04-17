@@ -4,6 +4,11 @@ const navItems = [
   { path: "/compare", title: "模型对比", desc: "ECharts 中文对比看板" },
   { path: "/train", title: "训练控制台", desc: "一键启动训练并监控日志" },
   { path: "/annotate", title: "数据标注", desc: "视频切帧/手工标注/自动标注" },
+  {
+    path: "/dataset",
+    title: "数据集整理",
+    desc: "COCO/YOLO/VOC 转 YOLO 训练集",
+  },
 ];
 </script>
 
