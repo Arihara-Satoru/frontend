@@ -4,6 +4,17 @@ import { computed, onMounted, reactive, ref, watch } from "vue";
 import api from "../utils/http";
 
 const DATASET_PAGE_STORAGE_KEY = "dataset_page_state_v1";
+const DEFAULT_TRAFFIC_CLASSES = [
+  "bicycle",
+  "car",
+  "motorcycle",
+  "bus",
+  "train",
+  "truck",
+  "traffic light",
+  "stop sign",
+  "parking meter",
+].join(",");
 
 const form = reactive({
   scanRoot: "dataset_download",
@@ -18,16 +29,26 @@ const form = reactive({
   cocoAnnotationFiles: "",
   cocoImageRoot: "",
   classNames: "",
+  trafficSourcePath: "dataset_download/coco",
+  trafficTargetRoot: "dataset_download",
+  trafficOutputName: "coco_traffic",
+  trafficClasses: DEFAULT_TRAFFIC_CLASSES,
+  trafficSplits: "train,val",
+  trafficIncludeEmptyLabels: false,
+  trafficCopyMode: "copy",
+  trafficOverwrite: false,
 });
 
 const loadingDefaults = ref(false);
 const loadingSources = ref(false);
 const loadingConvert = ref(false);
+const loadingTraffic = ref(false);
 const loadingHistory = ref(false);
 
 const sourceItems = ref([]);
 const historyItems = ref([]);
 const convertResult = ref(null);
+const trafficResult = ref(null);
 
 const supportedFormats = ref(["auto", "coco", "yolo", "voc"]);
 
@@ -126,8 +147,35 @@ function applyCache(cached) {
     form.classNames = cached.classNames;
   }
 
+  if (typeof cached.trafficSourcePath === "string") {
+    form.trafficSourcePath = cached.trafficSourcePath;
+  }
+  if (typeof cached.trafficTargetRoot === "string") {
+    form.trafficTargetRoot = cached.trafficTargetRoot;
+  }
+  if (typeof cached.trafficOutputName === "string") {
+    form.trafficOutputName = cached.trafficOutputName;
+  }
+  if (typeof cached.trafficClasses === "string") {
+    form.trafficClasses = cached.trafficClasses;
+  }
+  if (typeof cached.trafficSplits === "string") {
+    form.trafficSplits = cached.trafficSplits;
+  }
+  form.trafficIncludeEmptyLabels = Boolean(cached.trafficIncludeEmptyLabels);
+  form.trafficOverwrite = Boolean(cached.trafficOverwrite);
+  if (
+    typeof cached.trafficCopyMode === "string" &&
+    ["copy", "hardlink"].includes(cached.trafficCopyMode)
+  ) {
+    form.trafficCopyMode = cached.trafficCopyMode;
+  }
+
   if (cached.convertResult && typeof cached.convertResult === "object") {
     convertResult.value = cached.convertResult;
+  }
+  if (cached.trafficResult && typeof cached.trafficResult === "object") {
+    trafficResult.value = cached.trafficResult;
   }
 }
 
@@ -135,6 +183,7 @@ function persistCache() {
   writeCache({
     ...form,
     convertResult: convertResult.value,
+    trafficResult: trafficResult.value,
     savedAt: Date.now(),
   });
 }
@@ -178,6 +227,32 @@ async function loadDefaults() {
       data.supported_formats.length > 0
     ) {
       supportedFormats.value = data.supported_formats;
+    }
+
+    if (
+      typeof data.traffic_default_source === "string" &&
+      form.trafficSourcePath === "dataset_download/coco"
+    ) {
+      form.trafficSourcePath = data.traffic_default_source;
+    }
+    if (
+      typeof data.traffic_default_target_root === "string" &&
+      form.trafficTargetRoot === "dataset_download"
+    ) {
+      form.trafficTargetRoot = data.traffic_default_target_root;
+    }
+    if (
+      typeof data.traffic_default_output_name === "string" &&
+      form.trafficOutputName === "coco_traffic"
+    ) {
+      form.trafficOutputName = data.traffic_default_output_name;
+    }
+    if (
+      Array.isArray(data.traffic_default_classes) &&
+      data.traffic_default_classes.length > 0 &&
+      form.trafficClasses === DEFAULT_TRAFFIC_CLASSES
+    ) {
+      form.trafficClasses = data.traffic_default_classes.join(",");
     }
   } catch (error) {
     alert(`加载数据集整理默认参数失败: ${error.message}`);
@@ -278,6 +353,37 @@ async function convertDataset() {
   }
 }
 
+async function extractTrafficSubset() {
+  if (!form.trafficSourcePath.trim()) {
+    alert("请先填写交通子集源目录");
+    return;
+  }
+
+  loadingTraffic.value = true;
+  try {
+    const payload = {
+      source_path: form.trafficSourcePath.trim(),
+      target_root: form.trafficTargetRoot.trim() || "dataset_download",
+      output_name: form.trafficOutputName.trim() || "coco_traffic",
+      class_names: normalizeMultilineInput(form.trafficClasses),
+      splits: normalizeMultilineInput(form.trafficSplits),
+      include_empty_labels: form.trafficIncludeEmptyLabels,
+      copy_mode: form.trafficCopyMode,
+      overwrite: form.trafficOverwrite,
+      seed: Number(form.seed),
+      train_ratio: Number(form.trainRatio),
+    };
+
+    const response = await api.post("/dataset/traffic-subset", payload);
+    trafficResult.value = response.data.data || null;
+    alert("交通子集提取完成");
+  } catch (error) {
+    alert(`交通子集提取失败: ${error.message}`);
+  } finally {
+    loadingTraffic.value = false;
+  }
+}
+
 watch(
   form,
   () => {
@@ -287,6 +393,10 @@ watch(
 );
 
 watch(convertResult, () => {
+  persistCache();
+});
+
+watch(trafficResult, () => {
   persistCache();
 });
 
@@ -517,6 +627,98 @@ onMounted(async () => {
     </div>
   </section>
 
+  <section class="card-panel p-5">
+    <h3 class="section-title">交通子集筛选</h3>
+    <p class="section-subtitle mt-1">
+      从 YOLO 格式数据中筛选交通相关类别，自动重映射类别并生成 dataset.yaml。
+    </p>
+
+    <div
+      class="mt-4 grid gap-3 rounded-2xl border border-[var(--line-soft)] bg-[#f8fbfa] p-4 md:grid-cols-3"
+    >
+      <div class="md:col-span-2">
+        <label class="field-label">source_path (源目录)</label>
+        <input
+          v-model="form.trafficSourcePath"
+          class="field-input"
+          placeholder="例如: dataset_download/coco"
+        />
+      </div>
+
+      <div>
+        <label class="field-label">copy_mode</label>
+        <select v-model="form.trafficCopyMode" class="field-input">
+          <option value="copy">copy</option>
+          <option value="hardlink">hardlink</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="field-label">target_root (输出根目录)</label>
+        <input
+          v-model="form.trafficTargetRoot"
+          class="field-input"
+          placeholder="默认: dataset_download"
+        />
+      </div>
+
+      <div>
+        <label class="field-label">output_name (输出目录名)</label>
+        <input
+          v-model="form.trafficOutputName"
+          class="field-input"
+          placeholder="默认: coco_traffic"
+        />
+      </div>
+
+      <div>
+        <label class="field-label">splits</label>
+        <input
+          v-model="form.trafficSplits"
+          class="field-input"
+          placeholder="例如: train,val,test"
+        />
+      </div>
+
+      <div class="md:col-span-3">
+        <label class="field-label">class_names (逗号或换行分隔)</label>
+        <textarea
+          v-model="form.trafficClasses"
+          class="field-input min-h-24"
+          placeholder="例如: car,bus,truck,motorcycle,bicycle"
+        />
+      </div>
+
+      <div
+        class="rounded-xl border border-[var(--line-soft)] bg-white px-3 py-2 text-sm"
+      >
+        <label class="flex items-center gap-2">
+          <input v-model="form.trafficIncludeEmptyLabels" type="checkbox" />
+          保留筛选后空标签图片
+        </label>
+      </div>
+
+      <div
+        class="rounded-xl border border-[var(--line-soft)] bg-white px-3 py-2 text-sm"
+      >
+        <label class="flex items-center gap-2">
+          <input v-model="form.trafficOverwrite" type="checkbox" />
+          覆盖同名输出目录
+        </label>
+      </div>
+
+      <div class="md:col-span-3">
+        <button
+          class="btn-primary w-full"
+          :disabled="loadingTraffic"
+          @click="extractTrafficSubset"
+        >
+          {{ loadingTraffic ? "提取中..." : "提取交通子集" }}
+        </button>
+      </div>
+    </div>
+  </section>
+
   <section class="card-panel p-5" v-if="convertResult">
     <h3 class="section-title">最近一次转换结果</h3>
     <div class="mt-3 grid gap-2 md:grid-cols-3">
@@ -535,6 +737,65 @@ onMounted(async () => {
       <div class="metric-chip md:col-span-3" v-if="convertResult.skipped_count">
         跳过样本: {{ convertResult.skipped_count }}
       </div>
+    </div>
+  </section>
+
+  <section class="card-panel p-5" v-if="trafficResult">
+    <h3 class="section-title">最近一次交通子集结果</h3>
+    <div class="mt-3 grid gap-2 md:grid-cols-3">
+      <div class="metric-chip">图片总数: {{ trafficResult.image_count }}</div>
+      <div class="metric-chip">
+        目标总数: {{ trafficResult.objects_selected }}
+      </div>
+      <div class="metric-chip">类别数: {{ trafficResult.class_count }}</div>
+      <div class="metric-chip">train: {{ trafficResult.train_count }}</div>
+      <div class="metric-chip">val: {{ trafficResult.val_count }}</div>
+      <div class="metric-chip">test: {{ trafficResult.test_count }}</div>
+      <div class="metric-chip md:col-span-3 break-all">
+        输出目录:
+        {{ trafficResult.dataset_dir_relative || trafficResult.dataset_dir }}
+      </div>
+      <div class="metric-chip md:col-span-3 break-all">
+        dataset.yaml:
+        {{
+          trafficResult.dataset_yaml_relative || trafficResult.dataset_yaml_path
+        }}
+      </div>
+      <div class="metric-chip md:col-span-3 break-all">
+        类别: {{ (trafficResult.classes || []).join(", ") }}
+      </div>
+    </div>
+
+    <div
+      class="mt-4 overflow-x-auto"
+      v-if="(trafficResult.split_stats || []).length"
+    >
+      <table class="w-full min-w-[620px] border-collapse text-left text-sm">
+        <thead>
+          <tr class="border-b border-[var(--line-soft)] text-[var(--ink-sub)]">
+            <th class="px-2 py-2">split</th>
+            <th class="px-2 py-2">输入图片</th>
+            <th class="px-2 py-2">输出图片</th>
+            <th class="px-2 py-2">有标注图片</th>
+            <th class="px-2 py-2">筛后为空</th>
+            <th class="px-2 py-2">复制失败</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="item in trafficResult.split_stats"
+            :key="item.split"
+            class="border-b border-[var(--line-soft)] hover:bg-[#f8fbfa]"
+          >
+            <td class="px-2 py-2">{{ item.split }}</td>
+            <td class="px-2 py-2">{{ item.input_images }}</td>
+            <td class="px-2 py-2">{{ item.output_images }}</td>
+            <td class="px-2 py-2">{{ item.labeled_images }}</td>
+            <td class="px-2 py-2">{{ item.empty_after_filter }}</td>
+            <td class="px-2 py-2">{{ item.copy_fail }}</td>
+          </tr>
+        </tbody>
+      </table>
     </div>
   </section>
 

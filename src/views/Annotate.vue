@@ -12,6 +12,8 @@ import api from "../utils/http";
 
 const videoFile = ref(null);
 const videoFiles = ref([]);
+const imageFiles = ref([]);
+const imageFileInput = ref(null);
 const modelFile = ref(null);
 
 const classText = ref("car,bus,truck");
@@ -52,6 +54,7 @@ const loadingAppendFrames = ref(false);
 const loadingAppendAllFrames = ref(false);
 const loadingClearFrames = ref(false);
 const loadingCleanupBackend = ref(false);
+const loadingUploadImages = ref(false);
 const appendingSessionId = ref("");
 const appendedSourceSessionIds = ref([]);
 
@@ -72,6 +75,7 @@ const currentFrame = computed(
   () => frames.value[currentFrameIndex.value] || null,
 );
 const selectedVideoCount = computed(() => videoFiles.value.length);
+const selectedImageCount = computed(() => imageFiles.value.length);
 const appendedSourceSessionIdSet = computed(
   () => new Set(appendedSourceSessionIds.value),
 );
@@ -99,6 +103,17 @@ const selectedVideoPreviewText = computed(() => {
     return names.join("、");
   }
   return `${names.slice(0, 3).join("、")} 等 ${names.length} 个视频`;
+});
+const selectedImagePreviewText = computed(() => {
+  if (imageFiles.value.length === 0) {
+    return "";
+  }
+
+  const names = imageFiles.value.map((file) => file.name);
+  if (names.length <= 3) {
+    return names.join("、");
+  }
+  return `${names.slice(0, 3).join("、")} 等 ${names.length} 张图片`;
 });
 
 const ANNOTATE_STORAGE_KEY = "annotate_page_state_v1";
@@ -352,6 +367,10 @@ async function clearAllLocalCache() {
   try {
     videoFile.value = null;
     videoFiles.value = [];
+    imageFiles.value = [];
+    if (imageFileInput.value) {
+      imageFileInput.value.value = "";
+    }
     modelFile.value = null;
 
     classText.value = "car,bus,truck";
@@ -883,6 +902,17 @@ function onVideoFileChange(event) {
   videoFile.value = files[0] || null;
 }
 
+function onImageFilesChange(event) {
+  imageFiles.value = Array.from(event.target.files || []);
+}
+
+function clearImageUploadSelection() {
+  imageFiles.value = [];
+  if (imageFileInput.value) {
+    imageFileInput.value.value = "";
+  }
+}
+
 function onModelFileChange(event) {
   modelFile.value = event.target.files?.[0] || null;
 }
@@ -981,10 +1011,15 @@ function updateBoxAtIndex(index, nextBox) {
 
 function refreshCanvas() {
   const canvas = annotateCanvas.value;
-  const image = imageElement.value;
-  if (!canvas || !image) return;
-
   const ctx = canvas.getContext("2d");
+  if (!canvas || !ctx) return;
+
+  const image = imageElement.value;
+  if (!image) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    return;
+  }
+
   canvas.width = image.width;
   canvas.height = image.height;
 
@@ -1452,6 +1487,109 @@ async function createSessionAndExtract() {
   batchCurrentVideoName.value = "";
   loadingUpload.value = false;
   loadingExtract.value = false;
+}
+
+async function uploadImagesToFrameList() {
+  const inputFiles = imageFiles.value;
+  if (inputFiles.length === 0) {
+    alert("请先选择图片文件");
+    return;
+  }
+
+  const currentSessionId = String(sessionId.value || "").trim();
+  let targetSessionId = currentSessionId;
+
+  if (targetSessionId && unsaved.value) {
+    const ok = window.confirm(
+      "当前帧有未保存标注，上传图片会刷新帧列表，确定继续吗？",
+    );
+    if (!ok) {
+      return;
+    }
+  }
+
+  const parsedClasses = parseClassText(classText.value);
+  if (!targetSessionId && parsedClasses.length === 0) {
+    alert("请至少填写一个类别");
+    return;
+  }
+
+  loadingUploadImages.value = true;
+  try {
+    if (!targetSessionId) {
+      const createResponse = await api.post("/annotate/session/create-empty", {
+        classes: parsedClasses,
+        source_name:
+          inputFiles.length > 1
+            ? `image_batch_${Date.now()}`
+            : inputFiles[0].name,
+      });
+
+      const createData = createResponse.data.data || {};
+      targetSessionId = String(createData.session_id || "").trim();
+      if (!targetSessionId) {
+        throw new Error("后端未返回有效 session_id");
+      }
+
+      upsertSessionHistory({
+        session_id: targetSessionId,
+        video_name: String(createData.video_name || "图片会话"),
+        frame_count: 0,
+        classes: createData.classes || parsedClasses,
+        updated_at: new Date().toISOString(),
+      });
+    }
+
+    const formData = new FormData();
+    for (const file of inputFiles) {
+      formData.append("files", file);
+    }
+    formData.append("include_frames", "0");
+    formData.append("include_size", "0");
+
+    const uploadResponse = await api.post(
+      `/annotate/session/${targetSessionId}/upload-frames`,
+      formData,
+      {
+        timeout: 0,
+      },
+    );
+    const uploadData = uploadResponse.data.data || {};
+
+    await loadSessionById(targetSessionId, {
+      preferredFrameIndex:
+        targetSessionId === currentSessionId ? currentFrameIndex.value : 0,
+      preferredClassId: selectedClassId.value,
+      fallbackSplitResult: splitResult.value,
+      fallbackAutoLabelResult: autoLabelResult.value,
+    });
+
+    upsertSessionHistory({
+      session_id: targetSessionId,
+      video_name:
+        sessionHistory.value.find((item) => item.session_id === targetSessionId)
+          ?.video_name ||
+        (inputFiles.length > 1 ? "图片会话" : inputFiles[0].name),
+      frame_count: Number(uploadData.frame_count || frames.value.length),
+      classes: uploadData.classes || classList.value,
+      updated_at: new Date().toISOString(),
+    });
+
+    persistAnnotateCache();
+    clearImageUploadSelection();
+
+    const appendedCount = Number(uploadData.appended_count || 0);
+    const skippedCount = Number(uploadData.skipped_count || 0);
+    alert(
+      skippedCount > 0
+        ? `上传完成：新增 ${appendedCount} 帧，跳过 ${skippedCount} 个无效文件。`
+        : `上传完成：新增 ${appendedCount} 帧。`,
+    );
+  } catch (error) {
+    alert(`图片上传失败: ${error?.response?.data?.message || error.message}`);
+  } finally {
+    loadingUploadImages.value = false;
+  }
 }
 
 async function loadFrameAnnotation(frameName) {
@@ -1932,6 +2070,12 @@ onBeforeUnmount(() => {
     >
       已选择 {{ selectedVideoCount }} 个视频：{{ selectedVideoPreviewText }}
     </div>
+    <div
+      v-if="selectedImageCount > 0"
+      class="mt-1 text-xs text-[var(--ink-sub)]"
+    >
+      已选择 {{ selectedImageCount }} 张图片：{{ selectedImagePreviewText }}
+    </div>
 
     <div class="mt-3 flex flex-wrap gap-2 text-xs text-[var(--ink-sub)]">
       <span class="metric-chip">会话ID: {{ sessionId || "未创建" }}</span>
@@ -2087,6 +2231,35 @@ onBeforeUnmount(() => {
             @click="clearFrameList"
           >
             {{ loadingClearFrames ? "清空中..." : "清空列表" }}
+          </button>
+        </div>
+      </div>
+      <div
+        class="mb-3 rounded-xl border border-[var(--line-soft)] bg-[#f8fbfa] p-3"
+      >
+        <label class="field-label">直接上传图片到帧列表</label>
+        <input
+          ref="imageFileInput"
+          class="field-input"
+          type="file"
+          accept="image/*"
+          multiple
+          @change="onImageFilesChange"
+        />
+        <div class="mt-2 flex flex-wrap items-center justify-between gap-2">
+          <span class="text-[11px] text-[var(--ink-sub)]">
+            {{
+              selectedImageCount > 0
+                ? `已选择 ${selectedImageCount} 张：${selectedImagePreviewText}`
+                : "支持 jpg/jpeg/png；当前无会话时会自动创建空会话。"
+            }}
+          </span>
+          <button
+            class="btn-secondary px-3 py-1 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="loadingUploadImages || selectedImageCount === 0"
+            @click="uploadImagesToFrameList"
+          >
+            {{ loadingUploadImages ? "上传中..." : "上传图片" }}
           </button>
         </div>
       </div>
