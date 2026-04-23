@@ -14,6 +14,7 @@ const conf = ref(0.35);
 
 const imageFile = ref(null);
 const imageResult = ref(null);
+const imagePreviewUrl = ref("");
 const imageLoading = ref(false);
 const imageRequestMs = ref(null);
 
@@ -176,9 +177,20 @@ async function loadSystemInfo() {
 
 // 文件输入只负责更新响应式状态，真正推理交给后面的按钮逻辑。
 function onImageFileChange(event) {
-  imageFile.value = event.target.files?.[0] || null;
+  const file = event.target.files?.[0] || null;
+
+  if (imagePreviewUrl.value) {
+    URL.revokeObjectURL(imagePreviewUrl.value);
+    imagePreviewUrl.value = "";
+  }
+
+  imageFile.value = file;
   imageResult.value = null;
   imageRequestMs.value = null;
+
+  if (file) {
+    imagePreviewUrl.value = URL.createObjectURL(file);
+  }
 }
 
 function onVideoFileChange(event) {
@@ -502,6 +514,11 @@ onUnmounted(() => {
   clearVideoPollingTimer();
   clearCameraPollingTimer();
 
+  if (imagePreviewUrl.value) {
+    URL.revokeObjectURL(imagePreviewUrl.value);
+    imagePreviewUrl.value = "";
+  }
+
   if (typeof document !== "undefined") {
     document.removeEventListener(
       "visibilitychange",
@@ -580,7 +597,9 @@ onUnmounted(() => {
 
   <div class="space-y-5">
     <section class="card-panel p-5">
-      <div class="grid gap-4 lg:grid-cols-[1.45fr_0.85fr] lg:items-start">
+      <div
+        class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(460px,560px)] lg:items-start"
+      >
         <div class="space-y-3">
           <h3 class="section-title">图片识别</h3>
           <p class="section-subtitle mt-1">
@@ -590,21 +609,21 @@ onUnmounted(() => {
             class="overflow-hidden rounded-2xl border border-[var(--line-soft)] bg-black/90"
           >
             <img
-              v-if="imageResult"
-              :src="imageResult.image"
-              alt="image-result"
+              v-if="imageResult?.image || imagePreviewUrl"
+              :src="imageResult?.image || imagePreviewUrl"
+              :alt="imageResult ? 'image-result' : 'image-preview'"
               class="w-full"
             />
             <div
               v-else
               class="flex h-[280px] items-center justify-center text-sm text-white/75"
             >
-              尚未开始图片识别
+              选择图片后会立即显示预览
             </div>
           </div>
         </div>
 
-        <div class="space-y-3 lg:pt-11">
+        <div class="space-y-3 lg:pt-11 lg:w-full lg:max-w-[560px]">
           <input
             type="file"
             accept="image/*"
@@ -619,6 +638,9 @@ onUnmounted(() => {
             </div>
             <div class="mt-2 text-sm text-[var(--text-muted)]">
               先选择图片，再点击按钮开始识别。
+            </div>
+            <div v-if="imageFile" class="mt-2 text-sm text-[var(--text-muted)]">
+              已选择：{{ imageFile.name }}
             </div>
             <div class="mt-4 flex flex-col gap-2">
               <button
@@ -655,7 +677,9 @@ onUnmounted(() => {
     </section>
 
     <section class="card-panel p-5">
-      <div class="grid gap-4 lg:grid-cols-[1.45fr_0.85fr] lg:items-start">
+      <div
+        class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(460px,560px)] lg:items-start"
+      >
         <div class="space-y-3">
           <h3 class="section-title">视频实时识别</h3>
           <p class="section-subtitle mt-1">
@@ -679,7 +703,7 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div class="space-y-3 lg:pt-11">
+        <div class="space-y-3 lg:pt-11 lg:w-full lg:max-w-[560px]">
           <input
             type="file"
             accept="video/*"
@@ -711,7 +735,7 @@ onUnmounted(() => {
                 停止
               </button>
             </div>
-            <div class="mt-4 flex flex-wrap gap-2">
+            <div class="mt-4 grid grid-cols-2 gap-2">
               <div class="metric-chip">
                 运行状态: {{ videoRunning ? "运行中" : "未运行" }}
               </div>
@@ -772,7 +796,9 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="mt-4 grid gap-4 lg:grid-cols-[1.4fr_1fr]">
+    <div
+      class="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(460px,560px)] lg:items-start"
+    >
       <div
         class="overflow-hidden rounded-2xl border border-[var(--line-soft)] bg-black/90"
       >
@@ -790,7 +816,7 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <div class="space-y-2">
+      <div class="space-y-2 lg:w-full lg:max-w-[560px]">
         <div class="metric-chip">
           运行状态: {{ cameraRunning ? "运行中" : "未运行" }}
         </div>

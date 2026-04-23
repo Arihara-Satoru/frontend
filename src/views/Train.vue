@@ -6,6 +6,7 @@ import api from "../utils/http";
 // 训练页负责把参数表单、后端训练状态和实时日志串起来，前端只做控制台与状态展示。
 const form = reactive({
   data: "",
+  mode: "fine_tune",
   model: "ultralytics/cfg/models/v8/yolov8s_CA.yaml",
   weights: "yolov8s.pt",
   imgsz: 512,
@@ -99,8 +100,9 @@ function persistTrainForm() {
 // 参数提示统一放在一个对象里，模板只负责展示，不把说明文字散落到各处。
 const paramTips = {
   data: "训练数据集配置文件路径（YAML），需包含 train/val 路径和类别信息。",
+  mode: "训练模式。微调模式会加载预训练权重；从头训练会忽略 weights。",
   model: "模型结构配置或模型定义路径，例如 YOLOv8 结构配置文件。",
-  weights: "预训练权重文件路径；为空表示从头开始训练。",
+  weights: "预训练权重文件路径；微调模式会加载该项，从头训练时会忽略。",
   device: "训练设备。GPU 使用编号（如 0、1），CPU 使用 cpu。",
   imgsz: "训练输入分辨率，通常为 32 的倍数，越大精度潜力越高但显存占用越大。",
   epochs: "训练总轮次，轮次越多训练越充分，但耗时更长。",
@@ -111,6 +113,19 @@ const paramTips = {
   project: "训练输出主目录，包含日志、权重和可视化结果。",
   name: "本次训练实验名称，将作为 project 下的子目录。",
 };
+
+const trainingModeOptions = [
+  {
+    value: "fine_tune",
+    label: "微调模式",
+    description: "加载预训练权重继续训练",
+  },
+  {
+    value: "scratch",
+    label: "从头训练",
+    description: "不加载权重，直接重新训练",
+  },
+];
 
 // 这些状态对应训练任务是否在后端运行，以及日志轮询是否处于活跃状态。
 const running = ref(false);
@@ -196,7 +211,10 @@ async function startTraining() {
 
   startLoading.value = true;
   try {
-    await api.post("/train/start", { ...form });
+    await api.post("/train/start", {
+      ...form,
+      weights: form.mode === "scratch" ? "" : form.weights,
+    });
     await refreshStatus();
   } catch (error) {
     alert(`启动训练失败: ${error.message}`);
@@ -268,12 +286,35 @@ onUnmounted(() => {
       </div>
 
       <div>
+        <label class="field-label" :title="paramTips.mode">mode</label>
+        <select v-model="form.mode" class="field-input">
+          <option
+            v-for="item in trainingModeOptions"
+            :key="item.value"
+            :value="item.value"
+          >
+            {{ item.label }}
+          </option>
+        </select>
+        <div class="mt-1 text-xs text-[var(--ink-sub)]">
+          {{
+            trainingModeOptions.find((item) => item.value === form.mode)
+              ?.description
+          }}
+        </div>
+      </div>
+
+      <div>
         <label class="field-label" :title="paramTips.model">model</label>
         <input v-model="form.model" class="field-input" />
       </div>
       <div>
         <label class="field-label" :title="paramTips.weights">weights</label>
-        <input v-model="form.weights" class="field-input" />
+        <input
+          v-model="form.weights"
+          class="field-input"
+          :disabled="form.mode === 'scratch'"
+        />
       </div>
       <div>
         <label class="field-label" :title="paramTips.device">device</label>
