@@ -9,11 +9,12 @@ const modelList = ref([]);
 const selectedMap = reactive({});
 const conf = ref(0.35);
 const selectedDevice = ref("cpu");
-const mediaFile = ref(null);
+const mediaFiles = ref([]);
 
 const compareLoading = ref(false);
 const compareResults = ref([]);
 const recommendation = ref("");
+const sampleCount = ref(0);
 
 const speedChartRef = ref(null);
 const countChartRef = ref(null);
@@ -171,7 +172,7 @@ async function loadSystemInfo() {
 
 // 上传文件只负责更新待对比样本，真正识别由后面的对比按钮触发。
 function onFileChange(event) {
-  mediaFile.value = event.target.files?.[0] || null;
+  mediaFiles.value = Array.from(event.target.files || []);
 }
 
 // 从当前勾选状态里提取模型 id 列表，作为后端对比请求的输入。
@@ -381,8 +382,8 @@ function resizeAllCharts() {
 
 // 发起对比前需要同时具备样本文件和至少一个选中的模型。
 async function compareModels() {
-  if (!mediaFile.value) {
-    alert("请先上传用于对比的图片或视频");
+  if (!mediaFiles.value.length) {
+    alert("请先上传至少一张用于对比的图片");
     return;
   }
 
@@ -395,7 +396,9 @@ async function compareModels() {
   compareLoading.value = true;
   try {
     const form = new FormData();
-    form.append("file", mediaFile.value);
+    for (const file of mediaFiles.value) {
+      form.append("files", file);
+    }
     form.append("models", selectedModels.join(","));
     form.append("conf", String(conf.value));
     form.append("device", selectedDevice.value);
@@ -404,6 +407,7 @@ async function compareModels() {
     const payload = response.data.data;
     compareResults.value = payload.results;
     recommendation.value = payload.recommendation;
+    sampleCount.value = payload.sample_count || mediaFiles.value.length;
 
     renderCharts();
   } catch (error) {
@@ -463,20 +467,29 @@ onUnmounted(() => {
           一键输出多维图表，支持中文标签与中文字体渲染
         </p>
       </div>
-      <div class="metric-chip">推荐模型: {{ recommendation || "--" }}</div>
+      <div class="flex flex-wrap gap-2">
+        <div class="metric-chip">
+          样本数: {{ sampleCount || mediaFiles.length || "--" }}
+        </div>
+        <div class="metric-chip">推荐模型: {{ recommendation || "--" }}</div>
+      </div>
     </div>
 
     <div
       class="mt-4 grid gap-3 rounded-2xl border border-[var(--line-soft)] bg-[#f8fbfa] p-4 md:grid-cols-4"
     >
       <div>
-        <label class="field-label">样本文件</label>
+        <label class="field-label">样本图片</label>
         <input
           type="file"
-          accept="image/*,video/*"
+          accept="image/*"
+          multiple
           @change="onFileChange"
           class="field-input"
         />
+        <p class="mt-2 text-xs text-[var(--ink-sub)]">
+          已选择 {{ mediaFiles.length }} 张图片，系统会逐张测试后取平均值
+        </p>
       </div>
 
       <div>

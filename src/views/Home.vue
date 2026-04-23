@@ -9,12 +9,13 @@ const deviceInfo = ref(null);
 const modelList = ref([]);
 
 const selectedModel = ref("yolov8n");
-const selectedDevice = ref("cpu");
+const selectedDevice = ref("auto");
 const conf = ref(0.35);
 
 const imageFile = ref(null);
 const imageResult = ref(null);
 const imageLoading = ref(false);
+const imageRequestMs = ref(null);
 
 const videoFile = ref(null);
 const videoRunning = ref(false);
@@ -38,6 +39,14 @@ const lastAlarmAt = ref(0);
 const availableModels = computed(() =>
   modelList.value.filter((item) => item.exists),
 );
+
+// 当用户选择“自动优先设备”时，真正传给后端的是后端检测出的默认设备。
+const effectiveSelectedDevice = computed(() => {
+  if (selectedDevice.value === "auto") {
+    return deviceInfo.value?.selected_device || "cpu";
+  }
+  return selectedDevice.value;
+});
 
 // 这是本页本地缓存的存储键，用来恢复模型、设备和阈值设置。
 const HOME_INFERENCE_STORAGE_KEY = "home_inference_state_v1";
@@ -138,14 +147,14 @@ async function loadSystemInfo() {
     modelList.value = modelsRes.data.data;
 
     const autoDevice = deviceInfo.value?.selected_device || "cpu";
-    const supportedDevices = ["cpu", autoDevice];
+    const supportedDevices = ["auto", "cpu", autoDevice];
     if (deviceInfo.value?.cuda_available) {
       supportedDevices.push("cuda:0");
     }
 
     selectedDevice.value = supportedDevices.includes(preferredDevice)
       ? preferredDevice
-      : autoDevice;
+      : "auto";
 
     if (
       availableModels.value.length > 0 &&
@@ -169,6 +178,7 @@ async function loadSystemInfo() {
 function onImageFileChange(event) {
   imageFile.value = event.target.files?.[0] || null;
   imageResult.value = null;
+  imageRequestMs.value = null;
 }
 
 function onVideoFileChange(event) {
@@ -191,7 +201,7 @@ function ensureVideoPollingTimer() {
   if (videoPollTimer.value || !videoRunning.value) {
     return;
   }
-  videoPollTimer.value = setInterval(fetchVideoFrame, 260);
+  videoPollTimer.value = setInterval(fetchVideoFrame, 130);
 }
 
 // 摄像头轮询同样只保留一个活动定时器，避免状态切换时重复拉帧。
@@ -218,21 +228,40 @@ async function runImageInference() {
   }
 
   imageLoading.value = true;
+  const requestStartedAt = performance.now();
   try {
     const form = new FormData();
     form.append("file", imageFile.value);
     form.append("model_name", selectedModel.value);
     form.append("conf", String(conf.value));
-    form.append("device", selectedDevice.value);
+    form.append("device", effectiveSelectedDevice.value);
 
     const response = await api.post("/inference/image", form);
     imageResult.value = response.data.data;
+    imageRequestMs.value = Number(
+      (performance.now() - requestStartedAt).toFixed(2),
+    );
   } catch (error) {
     alert(`图片识别失败: ${error.message}`);
   } finally {
     imageLoading.value = false;
   }
 }
+
+const imageModelInferenceMs = computed(
+  () => imageResult.value?.metrics?.inference_ms ?? null,
+);
+
+const imageOverheadMs = computed(() => {
+  if (imageRequestMs.value == null || imageModelInferenceMs.value == null) {
+    return null;
+  }
+
+  return Math.max(
+    0,
+    Number((imageRequestMs.value - imageModelInferenceMs.value).toFixed(2)),
+  );
+});
 
 // 视频识别先启动后端任务，再通过轮询不断取回最新帧。
 async function runVideoInference() {
@@ -247,7 +276,7 @@ async function runVideoInference() {
     form.append("file", videoFile.value);
     form.append("model_name", selectedModel.value);
     form.append("conf", String(conf.value));
-    form.append("device", selectedDevice.value);
+    form.append("device", effectiveSelectedDevice.value);
 
     await api.post("/inference/video/start", form);
     videoRunning.value = true;
@@ -370,7 +399,7 @@ async function startCamera() {
       source: 0,
       model_name: selectedModel.value,
       conf: conf.value,
-      device: selectedDevice.value,
+      device: effectiveSelectedDevice.value,
     });
 
     cameraRunning.value = true;
@@ -517,9 +546,7 @@ onUnmounted(() => {
       <div>
         <label class="field-label">设备</label>
         <select v-model="selectedDevice" class="field-input">
-          <option :value="deviceInfo?.selected_device || 'cpu'">
-            自动优先设备
-          </option>
+          <option value="auto">自动优先设备</option>
           <option value="cpu">cpu</option>
           <option value="cuda:0" :disabled="!deviceInfo?.cuda_available">
             cuda:0
@@ -607,10 +634,16 @@ onUnmounted(() => {
                 车辆数: {{ imageResult?.metrics?.vehicle_count ?? "--" }}
               </div>
               <div class="metric-chip">
-                前车距离: {{ imageResult?.metrics?.distance_m ?? "--" }} m
+                模型推理耗时: {{ imageModelInferenceMs ?? "--" }} ms
               </div>
               <div class="metric-chip">
-                推理耗时: {{ imageResult?.metrics?.inference_ms ?? "--" }} ms
+                请求总耗时: {{ imageRequestMs ?? "--" }} ms
+              </div>
+              <div class="metric-chip">
+                额外开销: {{ imageOverheadMs ?? "--" }} ms
+              </div>
+              <div class="metric-chip">
+                前车距离: {{ imageResult?.metrics?.distance_m ?? "--" }} m
               </div>
               <div v-if="imageResult?.metrics?.alarm" class="alarm-chip">
                 TTC 小于 3 秒，触发报警
