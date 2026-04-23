@@ -201,7 +201,7 @@ function ensureVideoPollingTimer() {
   if (videoPollTimer.value || !videoRunning.value) {
     return;
   }
-  videoPollTimer.value = setInterval(fetchVideoFrame, 130);
+  videoPollTimer.value = setInterval(fetchVideoFrame, 30);
 }
 
 // 摄像头轮询同样只保留一个活动定时器，避免状态切换时重复拉帧。
@@ -217,7 +217,7 @@ function ensureCameraPollingTimer() {
   if (pollTimer.value || !cameraRunning.value) {
     return;
   }
-  pollTimer.value = setInterval(fetchCameraFrame, 260);
+  pollTimer.value = setInterval(fetchCameraFrame, 30);
 }
 
 // 图片识别是一次性请求，结果会直接回填到图像和指标卡片里。
