@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 
 import api from "../utils/http";
 
@@ -7,6 +7,7 @@ import api from "../utils/http";
 const form = reactive({
   data: "",
   mode: "fine_tune",
+  fine_tune_strategy: "full",
   model: "ultralytics/cfg/models/v8/yolov8s_CA.yaml",
   weights: "yolov8s.pt",
   imgsz: 512,
@@ -18,6 +19,10 @@ const form = reactive({
   cache: "disk",
   workers: 2,
   inner_iou_ratio: 0.7,
+  freeze_layers: 10,
+  lr0: 0.002,
+  lrf: 0.01,
+  warmup_epochs: 3,
 });
 
 // 本地缓存键用于恢复上次填写的训练参数，避免每次重新输入。
@@ -28,6 +33,10 @@ const TRAIN_NUMERIC_FIELDS = [
   "batch",
   "workers",
   "inner_iou_ratio",
+  "freeze_layers",
+  "lr0",
+  "lrf",
+  "warmup_epochs",
 ];
 
 // 从 localStorage 恢复训练表单，数值字段会单独转成数字类型。
@@ -100,7 +109,8 @@ function persistTrainForm() {
 // 参数提示统一放在一个对象里，模板只负责展示，不把说明文字散落到各处。
 const paramTips = {
   data: "训练数据集配置文件路径（YAML），需包含 train/val 路径和类别信息。",
-  mode: "训练模式。微调模式会加载预训练权重；从头训练会忽略 weights。",
+  mode: "训练模式。微调模式会展开更细的策略配置；从头训练会忽略 weights。",
+  fine_tune_strategy: "微调策略。不同策略会显示不同的可填参数，并自动回填推荐值。",
   model: "模型结构配置或模型定义路径，例如 YOLOv8 结构配置文件。",
   weights: "预训练权重文件路径；微调模式会加载该项，从头训练时会忽略。",
   device: "训练设备。GPU 使用编号（如 0、1），CPU 使用 cpu。",
@@ -109,6 +119,10 @@ const paramTips = {
   batch: "每次迭代的样本数，受显存限制；过大可能导致显存不足。",
   workers: "数据加载线程数，适当增大可提升数据读取速度。",
   inner_iou_ratio: "Inner-IoU 比例系数，用于你当前自定义损失设定。",
+  freeze_layers: "冻结层数，数值越大表示冻结的网络越多；适合冻结骨干或只训检测头。",
+  lr0: "初始学习率。微调时通常比从头训练更小，避免破坏已有特征。",
+  lrf: "最终学习率比例，决定后期学习率衰减到初始值的多少倍。",
+  warmup_epochs: "预热轮数，适当预热可以让微调初期更稳定。",
   cache: "数据缓存策略：disk(磁盘缓存)、ram(内存缓存)、none(不缓存)。",
   project: "训练输出主目录，包含日志、权重和可视化结果。",
   name: "本次训练实验名称，将作为 project 下的子目录。",
@@ -118,7 +132,7 @@ const trainingModeOptions = [
   {
     value: "fine_tune",
     label: "微调模式",
-    description: "加载预训练权重继续训练",
+    description: "加载预训练权重，并根据策略显示更细的可填参数",
   },
   {
     value: "scratch",
@@ -126,6 +140,87 @@ const trainingModeOptions = [
     description: "不加载权重，直接重新训练",
   },
 ];
+
+const fineTuneStrategyOptions = [
+  {
+    value: "full",
+    label: "全量微调",
+    description: "保留预训练权重，全部参数参与更新。",
+  },
+  {
+    value: "freeze_backbone",
+    label: "冻结骨干",
+    description: "冻结前部特征提取层，只训练后部与检测头。",
+  },
+  {
+    value: "head_only",
+    label: "只训检测头",
+    description: "冻结更多层，仅让检测头参与更新。",
+  },
+  {
+    value: "low_lr",
+    label: "低学习率微调",
+    description: "不冻结层，但使用更低的学习率进行轻量适配。",
+  },
+];
+
+const selectedModeOption = computed(
+  () =>
+    trainingModeOptions.find((item) => item.value === form.mode) ||
+    trainingModeOptions[0],
+);
+
+const selectedFineTuneStrategy = computed(
+  () =>
+    fineTuneStrategyOptions.find(
+      (item) => item.value === form.fine_tune_strategy,
+    ) || fineTuneStrategyOptions[0],
+);
+
+const isFineTuneMode = computed(() => form.mode === "fine_tune");
+const shouldShowFreezeLayers = computed(() =>
+  ["freeze_backbone", "head_only"].includes(form.fine_tune_strategy),
+);
+const shouldShowLearningRates = computed(() =>
+  ["full", "low_lr"].includes(form.fine_tune_strategy),
+);
+
+const fineTunePresets = {
+  full: {
+    freeze_layers: 0,
+    lr0: 0.002,
+    lrf: 0.01,
+    warmup_epochs: 3,
+  },
+  freeze_backbone: {
+    freeze_layers: 10,
+    lr0: 0.0015,
+    lrf: 0.01,
+    warmup_epochs: 3,
+  },
+  head_only: {
+    freeze_layers: 20,
+    lr0: 0.001,
+    lrf: 0.01,
+    warmup_epochs: 2,
+  },
+  low_lr: {
+    freeze_layers: 0,
+    lr0: 0.0005,
+    lrf: 0.005,
+    warmup_epochs: 3,
+  },
+};
+
+const formReady = ref(false);
+
+function applyFineTunePreset(strategy = form.fine_tune_strategy) {
+  const preset = fineTunePresets[strategy] || fineTunePresets.full;
+  form.freeze_layers = preset.freeze_layers;
+  form.lr0 = preset.lr0;
+  form.lrf = preset.lrf;
+  form.warmup_epochs = preset.warmup_epochs;
+}
 
 // 这些状态对应训练任务是否在后端运行，以及日志轮询是否处于活跃状态。
 const running = ref(false);
@@ -238,6 +333,28 @@ async function stopTraining() {
 
 // 表单任何字段变化都应该落盘一次，避免刷新后丢参。
 watch(
+  () => form.fine_tune_strategy,
+  () => {
+    if (formReady.value && isFineTuneMode.value) {
+      applyFineTunePreset();
+    }
+  },
+);
+
+watch(
+  () => form.mode,
+  (mode, previousMode) => {
+    if (!formReady.value) {
+      return;
+    }
+
+    if (mode === "fine_tune" && previousMode !== "fine_tune") {
+      applyFineTunePreset();
+    }
+  },
+);
+
+watch(
   form,
   () => {
     persistTrainForm();
@@ -248,9 +365,13 @@ watch(
 // 挂载后按“默认值 -> 缓存 -> 设备 -> 状态”的顺序初始化。
 onMounted(async () => {
   await loadDefaults();
+  if (form.mode === "fine_tune") {
+    applyFineTunePreset();
+  }
   applyCachedTrainForm();
   await loadTrainingDevices();
   await refreshStatus();
+  formReady.value = true;
   pollTimer = setInterval(refreshStatus, 2000);
 });
 
@@ -297,10 +418,7 @@ onUnmounted(() => {
           </option>
         </select>
         <div class="mt-1 text-xs text-[var(--ink-sub)]">
-          {{
-            trainingModeOptions.find((item) => item.value === form.mode)
-              ?.description
-          }}
+          {{ selectedModeOption.description }}
         </div>
       </div>
 
@@ -316,6 +434,77 @@ onUnmounted(() => {
           :disabled="form.mode === 'scratch'"
         />
       </div>
+
+      <div v-if="isFineTuneMode" class="md:col-span-3 rounded-2xl border border-[var(--line-soft)] bg-white p-4">
+        <div class="text-sm font-semibold text-[var(--text-strong)]">微调策略</div>
+        <div class="mt-1 text-xs text-[var(--ink-sub)]">
+          {{ selectedFineTuneStrategy.description }}
+        </div>
+
+        <div class="mt-3 grid gap-3 md:grid-cols-2">
+          <div class="md:col-span-2">
+            <label class="field-label" :title="paramTips.fine_tune_strategy">fine_tune_strategy</label>
+            <select v-model="form.fine_tune_strategy" class="field-input">
+              <option
+                v-for="item in fineTuneStrategyOptions"
+                :key="item.value"
+                :value="item.value"
+              >
+                {{ item.label }}
+              </option>
+            </select>
+          </div>
+
+          <div v-if="shouldShowFreezeLayers">
+            <label class="field-label" :title="paramTips.freeze_layers">freeze_layers</label>
+            <input
+              v-model.number="form.freeze_layers"
+              type="number"
+              min="0"
+              step="1"
+              class="field-input"
+            />
+          </div>
+
+          <div v-if="shouldShowLearningRates">
+            <label class="field-label" :title="paramTips.lr0">lr0</label>
+            <input
+              v-model.number="form.lr0"
+              type="number"
+              min="0"
+              step="0.0001"
+              class="field-input"
+            />
+          </div>
+
+          <div v-if="shouldShowLearningRates">
+            <label class="field-label" :title="paramTips.lrf">lrf</label>
+            <input
+              v-model.number="form.lrf"
+              type="number"
+              min="0"
+              step="0.0001"
+              class="field-input"
+            />
+          </div>
+
+          <div>
+            <label class="field-label" :title="paramTips.warmup_epochs">warmup_epochs</label>
+            <input
+              v-model.number="form.warmup_epochs"
+              type="number"
+              min="0"
+              step="0.5"
+              class="field-input"
+            />
+          </div>
+
+          <div class="md:col-span-2 text-xs text-[var(--ink-sub)]">
+            切换策略后会回填对应推荐值，你可以在这里继续微调冻结层数和学习率。
+          </div>
+        </div>
+      </div>
+
       <div>
         <label class="field-label" :title="paramTips.device">device</label>
         <select
