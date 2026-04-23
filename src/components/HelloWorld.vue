@@ -1,13 +1,15 @@
 <script setup>
-import { ref } from 'vue'
-import viteLogo from '../assets/vite.svg'
-import heroImg from '../assets/hero.png'
-import vueLogo from '../assets/vue.svg'
+import { ref } from "vue";
+import viteLogo from "../assets/vite.svg";
+import heroImg from "../assets/hero.png";
+import vueLogo from "../assets/vue.svg";
 
-const count = ref(0)
+// 这是 Vite 默认示例页，主要用于演示图片资源、响应式状态和按钮交互。
+const count = ref(0);
 </script>
 
 <template>
+  <!-- 页面主体分成头部英雄区、文档入口和社区入口，结构上就是一个模板示例。 -->
   <section id="center">
     <div class="hero">
       <img :src="heroImg" class="base" width="170" height="179" alt="" />
@@ -21,6 +23,7 @@ const count = ref(0)
     <button class="counter" @click="count++">Count is {{ count }}</button>
   </section>
 
+  <!-- 下面两块是给新项目保留的跳转示例，不参与业务逻辑。 -->
   <div class="ticks"></div>
 
   <section id="next-steps">

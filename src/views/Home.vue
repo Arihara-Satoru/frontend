@@ -170,6 +170,34 @@ function onVideoFileChange(event) {
   videoFinished.value = false;
 }
 
+function clearVideoPollingTimer() {
+  if (videoPollTimer.value) {
+    clearInterval(videoPollTimer.value);
+    videoPollTimer.value = null;
+  }
+}
+
+function ensureVideoPollingTimer() {
+  if (videoPollTimer.value || !videoRunning.value) {
+    return;
+  }
+  videoPollTimer.value = setInterval(fetchVideoFrame, 260);
+}
+
+function clearCameraPollingTimer() {
+  if (pollTimer.value) {
+    clearInterval(pollTimer.value);
+    pollTimer.value = null;
+  }
+}
+
+function ensureCameraPollingTimer() {
+  if (pollTimer.value || !cameraRunning.value) {
+    return;
+  }
+  pollTimer.value = setInterval(fetchCameraFrame, 260);
+}
+
 async function runImageInference() {
   if (!imageFile.value) {
     alert("请先选择图片文件");
@@ -213,11 +241,8 @@ async function runVideoInference() {
     videoFrame.value = "";
     videoMetrics.value = null;
 
-    if (videoPollTimer.value) {
-      clearInterval(videoPollTimer.value);
-    }
-
-    videoPollTimer.value = setInterval(fetchVideoFrame, 260);
+    clearVideoPollingTimer();
+    ensureVideoPollingTimer();
     await fetchVideoFrame();
   } catch (error) {
     alert(`视频实时识别失败: ${error.message}`);
@@ -247,7 +272,12 @@ async function fetchVideoFrame() {
 
     if (status === 409 && /结束|停止/.test(message)) {
       videoFinished.value = true;
-      await stopVideoInference(true);
+      await stopVideoInference(true, false);
+      return;
+    }
+
+    if (status === 409 && /未启动/.test(message)) {
+      await stopVideoInference(true, false);
       return;
     }
 
@@ -257,17 +287,16 @@ async function fetchVideoFrame() {
   }
 }
 
-async function stopVideoInference(silent = false) {
-  if (videoPollTimer.value) {
-    clearInterval(videoPollTimer.value);
-    videoPollTimer.value = null;
-  }
+async function stopVideoInference(silent = false, syncBackend = true) {
+  clearVideoPollingTimer();
 
-  try {
-    await api.post("/inference/video/stop");
-  } catch (error) {
-    if (!silent) {
-      console.error(error);
+  if (syncBackend) {
+    try {
+      await api.post("/inference/video/stop");
+    } catch (error) {
+      if (!silent) {
+        console.error(error);
+      }
     }
   }
 
@@ -303,6 +332,12 @@ async function fetchCameraFrame() {
       triggerAlarm(payload.alarm_audio_url);
     }
   } catch (error) {
+    const status = error.response?.status;
+    const message = error.response?.data?.message || error.message;
+    if (status === 409 && /未启动|停止/.test(message)) {
+      await stopCamera(true, false);
+      return;
+    }
     console.error(error);
   } finally {
     pollBusy.value = false;
@@ -323,11 +358,9 @@ async function startCamera() {
     cameraFrame.value = "";
     cameraMetrics.value = null;
 
-    if (pollTimer.value) {
-      clearInterval(pollTimer.value);
-    }
-
-    pollTimer.value = setInterval(fetchCameraFrame, 260);
+    clearCameraPollingTimer();
+    ensureCameraPollingTimer();
+    await fetchCameraFrame();
   } catch (error) {
     alert(`启动实时识别失败: ${error.message}`);
   } finally {
@@ -335,19 +368,57 @@ async function startCamera() {
   }
 }
 
-async function stopCamera() {
-  if (pollTimer.value) {
-    clearInterval(pollTimer.value);
-    pollTimer.value = null;
-  }
+async function stopCamera(silent = false, syncBackend = true) {
+  clearCameraPollingTimer();
 
-  try {
-    await api.post("/inference/camera/stop");
-  } catch (error) {
-    console.error(error);
+  if (syncBackend) {
+    try {
+      await api.post("/inference/camera/stop");
+    } catch (error) {
+      if (!silent) {
+        console.error(error);
+      }
+    }
   }
 
   cameraRunning.value = false;
+}
+
+async function syncInferenceRuntimeStatus() {
+  try {
+    const response = await api.get("/inference/status");
+    const statusData = response.data.data || {};
+    const videoStatus = statusData.video || {};
+    const cameraStatus = statusData.camera || {};
+
+    videoRunning.value = Boolean(videoStatus.running);
+    cameraRunning.value = Boolean(cameraStatus.running);
+
+    if (!videoRunning.value) {
+      clearVideoPollingTimer();
+      videoPollingBusy.value = false;
+    } else {
+      videoFinished.value = false;
+      ensureVideoPollingTimer();
+      await fetchVideoFrame();
+    }
+
+    if (!cameraRunning.value) {
+      clearCameraPollingTimer();
+      pollBusy.value = false;
+    } else {
+      ensureCameraPollingTimer();
+      await fetchCameraFrame();
+    }
+  } catch (error) {
+    console.error("同步后端推理状态失败", error);
+  }
+}
+
+function handleDocumentVisibilityChange() {
+  if (document.visibilityState === "visible") {
+    syncInferenceRuntimeStatus();
+  }
 }
 
 watch(
@@ -362,11 +433,24 @@ onMounted(async () => {
   const cached = readHomeInferenceCache();
   applyHomeInferenceCache(cached);
   await loadSystemInfo();
+  await syncInferenceRuntimeStatus();
+
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", handleDocumentVisibilityChange);
+  }
 });
 
-onUnmounted(async () => {
+onUnmounted(() => {
   persistHomeInferenceCache();
-  await Promise.allSettled([stopVideoInference(true), stopCamera()]);
+  clearVideoPollingTimer();
+  clearCameraPollingTimer();
+
+  if (typeof document !== "undefined") {
+    document.removeEventListener(
+      "visibilitychange",
+      handleDocumentVisibilityChange,
+    );
+  }
 });
 </script>
 

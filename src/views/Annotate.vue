@@ -10,12 +10,15 @@ import {
 
 import api from "../utils/http";
 
+// 标注页把“视频/图片上传、会话管理、逐帧标注、自动标注、数据集划分”串成一个完整工作流。
+// 这里的状态很多，但可以按“输入源 / 当前会话 / 当前帧 / 交互控制 / 后端状态”来理解。
 const videoFile = ref(null);
 const videoFiles = ref([]);
 const imageFiles = ref([]);
 const imageFileInput = ref(null);
 const modelFile = ref(null);
 
+// 上传与切帧参数：类别文本、抽帧间隔、最大帧数、是否清理源视频，以及划分训练集比例。
 const classText = ref("car,bus,truck");
 const frameStep = ref(5);
 const maxFrames = ref(200);
@@ -23,10 +26,12 @@ const cleanupSourceVideo = ref(true);
 const trainRatio = ref(0.8);
 const datasetName = ref("");
 
+// 当前会话与类别列表，后端返回的类名会回填到这里，确保标注和自动标注使用同一套类别定义。
 const sessionId = ref("");
 const classList = ref([]);
 const selectedClassId = ref(0);
 
+// 当前会话的帧列表、当前选中帧以及这一帧里的所有目标框。
 const frames = ref([]);
 const frameListVisibleCount = ref(0);
 const currentFrameIndex = ref(0);
@@ -34,17 +39,20 @@ const currentBoxes = ref([]);
 const unsaved = ref(false);
 const selectedBoxIndex = ref(-1);
 
+// Canvas 和图片元素引用，用来把当前帧图像绘制出来，再叠加标注框。
 const annotateCanvas = ref(null);
 const imageElement = ref(null);
 let drawing = false;
 let draftBox = null;
 let activeInteraction = null;
 
+// 交互常量：最小框尺寸、控制点尺寸，以及帧列表分页大小。
 const MIN_BOX_SIZE = 6;
 const HANDLE_SIZE = 5;
 const HANDLE_HIT_SIZE = 14;
 const FRAME_LIST_PAGE_SIZE = 240;
 
+// 这些加载态主要控制按钮禁用和请求提示，避免重复提交。
 const loadingUpload = ref(false);
 const loadingExtract = ref(false);
 const loadingSaveBox = ref(false);
@@ -58,11 +66,13 @@ const loadingUploadImages = ref(false);
 const appendingSessionId = ref("");
 const appendedSourceSessionIds = ref([]);
 
+// 自动标注模型及其推理参数。
 const modelOptions = ref([]);
 const selectedModel = ref("yolov8n");
 const autoLabelConf = ref(0.25);
 const autoLabelDevice = ref("cpu");
 
+// 最近一次切分/自动标注结果，以及历史会话和批处理进度。
 const splitResult = ref(null);
 const autoLabelResult = ref(null);
 const sessionHistory = ref([]);
@@ -116,6 +126,7 @@ const selectedImagePreviewText = computed(() => {
   return `${names.slice(0, 3).join("、")} 等 ${names.length} 张图片`;
 });
 
+// 本地缓存键只负责恢复页面状态，不代替后端真实数据。
 const ANNOTATE_STORAGE_KEY = "annotate_page_state_v1";
 let cachePersistPaused = false;
 
@@ -161,6 +172,7 @@ function clearAnnotateCache() {
   }
 }
 
+// 把外部传入的数值安全压到合法区间，避免旧缓存或异常输入污染页面状态。
 function toFiniteNumber(value, fallback, min, max) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
@@ -169,6 +181,7 @@ function toFiniteNumber(value, fallback, min, max) {
   return clamp(numeric, min, max);
 }
 
+// 历史会话条目需要做规范化，保证缺失字段、空值和重复项不会污染列表。
 function normalizeSessionHistoryEntry(entry) {
   const nextSessionId = String(entry?.session_id || "").trim();
   if (!nextSessionId) {
@@ -188,6 +201,7 @@ function normalizeSessionHistoryEntry(entry) {
   };
 }
 
+// 历史列表只保留最近的有效项，并去重 session_id，避免缓存无限膨胀。
 function normalizeSessionHistory(rawHistory) {
   if (!Array.isArray(rawHistory)) {
     return [];
@@ -207,6 +221,7 @@ function normalizeSessionHistory(rawHistory) {
   return normalized.slice(0, 60);
 }
 
+// 新会话进入历史时放到最前面，重复项会被覆盖到最新状态。
 function upsertSessionHistory(entry) {
   const normalized = normalizeSessionHistoryEntry(entry);
   if (!normalized) {
@@ -222,6 +237,7 @@ function upsertSessionHistory(entry) {
   sessionHistory.value = nextHistory.slice(0, 60);
 }
 
+// 追加来源会话 ID 也需要去重和清洗，避免重复追加同一个会话。
 function normalizeSessionIdList(values) {
   if (!Array.isArray(values)) {
     return [];
@@ -241,6 +257,7 @@ function normalizeSessionIdList(values) {
   return normalized;
 }
 
+// 判断某个历史会话是否已经追加过，用于控制单会话追加和一键追加按钮状态。
 function isSessionAlreadyAppended(sourceSessionId) {
   const normalizedSourceSessionId = String(sourceSessionId || "").trim();
   if (!normalizedSourceSessionId) {
@@ -249,6 +266,7 @@ function isSessionAlreadyAppended(sourceSessionId) {
   return appendedSourceSessionIdSet.value.has(normalizedSourceSessionId);
 }
 
+// 这组函数负责“帧列表显示多少项”的分页逻辑，避免一次渲染过多帧导致卡顿。
 function syncVisibleFrameCount() {
   if (frames.value.length === 0) {
     frameListVisibleCount.value = 0;
@@ -262,6 +280,7 @@ function syncVisibleFrameCount() {
   );
 }
 
+// 当前选中的帧必须始终可见，否则用户切换后会看不到自己的位置。
 function ensureCurrentFrameVisible() {
   const minVisible = Math.min(frames.value.length, currentFrameIndex.value + 1);
   if (minVisible <= frameListVisibleCount.value) {
@@ -274,6 +293,7 @@ function ensureCurrentFrameVisible() {
   );
 }
 
+// 手动加载更多帧时，直接追加一页显示数量。
 function loadMoreFrames() {
   frameListVisibleCount.value = Math.min(
     frames.value.length,
@@ -281,6 +301,7 @@ function loadMoreFrames() {
   );
 }
 
+// 从本地缓存恢复设置时，只接受经过校验的字段，避免旧缓存覆盖当前状态。
 function applyCachedSettings(cached) {
   if (!cached || typeof cached !== "object") {
     return;
@@ -330,6 +351,7 @@ function applyCachedSettings(cached) {
   sessionHistory.value = normalizeSessionHistory(cached.sessionHistory);
 }
 
+// 组件状态会持续写入 localStorage，保证刷新后仍能恢复最近使用的会话和参数。
 function persistAnnotateCache() {
   if (cachePersistPaused) {
     return;
@@ -355,6 +377,7 @@ function persistAnnotateCache() {
   });
 }
 
+// 一键清空前端缓存只重置本地状态，不会删除后端会话目录。
 async function clearAllLocalCache() {
   const ok = window.confirm(
     "确定一键清除本页全部本地缓存吗？这不会删除后端会话数据。",
@@ -401,6 +424,7 @@ async function clearAllLocalCache() {
   alert("本地缓存已清除，页面状态已重置");
 }
 
+// 文件大小格式化用于后端清理结果和上传结果，统一成用户可读的提示。
 function formatFileSize(sizeBytes) {
   const size = Number(sizeBytes);
   if (!Number.isFinite(size) || size <= 0) {
@@ -490,6 +514,7 @@ async function clearBackendStorage() {
   }
 }
 
+// 重置当前会话相关状态，用于清空帧列表、切换失效会话和恢复失败后的兜底。
 function resetSessionState() {
   sessionId.value = "";
   frames.value = [];
@@ -507,6 +532,7 @@ function resetSessionState() {
   refreshCanvas();
 }
 
+// 按会话 ID 从后端拉取帧列表和类名，是进入某个历史会话的核心入口。
 async function loadSessionById(targetSessionId, options = {}) {
   const normalizedTargetSessionId = String(targetSessionId || "").trim();
   if (!normalizedTargetSessionId) {
@@ -600,6 +626,7 @@ async function loadSessionById(targetSessionId, options = {}) {
   return data;
 }
 
+// 刷新当前会话的帧信息时，保留当前帧和类选择，避免用户上下文被打断。
 async function reloadCurrentSessionFrames() {
   if (!sessionId.value) {
     return;
@@ -613,6 +640,7 @@ async function reloadCurrentSessionFrames() {
   });
 }
 
+// 从缓存恢复会话时，优先尝试重新向后端同步；如果会话已失效，就清理掉本地历史引用。
 async function restoreSessionFromCache(cached) {
   const restoredSessionId = String(cached?.sessionId || "").trim();
   if (!restoredSessionId) {
@@ -635,6 +663,7 @@ async function restoreSessionFromCache(cached) {
   }
 }
 
+// 切换会话前要先处理未保存标记，避免用户在当前帧上的修改被直接丢掉。
 async function switchSession(targetSessionId) {
   const normalizedTargetSessionId = String(targetSessionId || "").trim();
   if (
@@ -660,6 +689,7 @@ async function switchSession(targetSessionId) {
   }
 }
 
+// 历史会话删除包含前后端双向清理：先删服务器目录，再同步前端历史列表。
 async function deleteSessionHistory(targetSessionId) {
   const normalizedTargetSessionId = String(targetSessionId || "").trim();
   if (!normalizedTargetSessionId) {
@@ -712,6 +742,7 @@ async function deleteSessionHistory(targetSessionId) {
   persistAnnotateCache();
 }
 
+// 把其他会话的帧追加到当前会话，用于补充训练集和继续标注同类数据。
 async function appendSessionFrames(sourceSessionId) {
   const normalizedSourceSessionId = String(sourceSessionId || "").trim();
   if (!normalizedSourceSessionId) {
@@ -793,6 +824,7 @@ async function appendSessionFrames(sourceSessionId) {
   }
 }
 
+// 一键追加会遍历可追加的历史会话，适合一次性整合多个旧会话的帧。
 async function appendAllSessionsFrames() {
   if (!sessionId.value) {
     alert("请先选择一个当前会话");
@@ -1009,6 +1041,7 @@ function updateBoxAtIndex(index, nextBox) {
   currentBoxes.value[index] = normalizeBox(nextBox);
 }
 
+// Canvas 重绘是页面最核心的视觉输出：当前帧图像、已有框和临时草稿框都在这里统一绘制。
 function refreshCanvas() {
   const canvas = annotateCanvas.value;
   const ctx = canvas.getContext("2d");
@@ -1092,6 +1125,7 @@ function refreshCanvas() {
   }
 }
 
+// 把鼠标事件换算到 Canvas 像素坐标系，避免显示缩放导致坐标不一致。
 function toCanvasPoint(event) {
   const canvas = annotateCanvas.value;
   const rect = canvas.getBoundingClientRect();
@@ -1103,6 +1137,7 @@ function toCanvasPoint(event) {
   };
 }
 
+// 鼠标按下时决定是“拖动已有框、缩放已有框”还是“开始新建框”。
 function onCanvasMouseDown(event) {
   if (!currentFrame.value) return;
   const pt = toCanvasPoint(event);
@@ -1154,6 +1189,7 @@ function onCanvasMouseDown(event) {
   refreshCanvas();
 }
 
+// 鼠标移动时根据当前交互类型更新草稿框、平移框或缩放框。
 function onCanvasMouseMove(event) {
   const pt = toCanvasPoint(event);
 
@@ -1223,6 +1259,7 @@ function onCanvasMouseMove(event) {
   }
 }
 
+// 鼠标松开后把草稿框落盘成正式框，并把当前会话标记为有未保存修改。
 function onCanvasMouseUp(event) {
   if (!activeInteraction) return;
 
@@ -1256,6 +1293,7 @@ function onCanvasMouseUp(event) {
   refreshCanvas();
 }
 
+// 鼠标离开画布时，只收起绘制中的草稿框，避免留下一半未完成的临时框。
 function onCanvasMouseLeave() {
   if (!activeInteraction) return;
 
@@ -1265,6 +1303,7 @@ function onCanvasMouseLeave() {
   }
 }
 
+// 全局 mouseup 用来兜底拖拽结束，避免鼠标松开时指针不在画布上导致状态卡住。
 function onWindowMouseUp(event) {
   if (!activeInteraction) return;
 
@@ -1353,6 +1392,7 @@ async function uploadModel() {
   }
 }
 
+// 视频批量切帧是标注流程的入口：先上传文件，再由后端抽帧并生成会话。
 async function createSessionAndExtract() {
   const inputFiles =
     videoFiles.value.length > 0
@@ -1489,6 +1529,7 @@ async function createSessionAndExtract() {
   loadingExtract.value = false;
 }
 
+// 图片上传用于直接往当前会话追加图片帧，适合补帧和手工整理数据集。
 async function uploadImagesToFrameList() {
   const inputFiles = imageFiles.value;
   if (inputFiles.length === 0) {
@@ -1592,6 +1633,7 @@ async function uploadImagesToFrameList() {
   }
 }
 
+// 单帧标注数据拉取后，需要回填类别、框和图片尺寸，保证画布缩放和框坐标一致。
 async function loadFrameAnnotation(frameName) {
   const response = await api.get(
     `/annotate/session/${sessionId.value}/annotation/${frameName}`,
@@ -1621,6 +1663,7 @@ async function loadFrameAnnotation(frameName) {
   );
 }
 
+// 切换当前帧时重新加载图片与标注，并在图片加载后刷新 Canvas。
 async function loadCurrentFrame() {
   if (!currentFrame.value || !sessionId.value) return;
 
@@ -1636,6 +1679,7 @@ async function loadCurrentFrame() {
   unsaved.value = false;
 }
 
+// 选中框的光标样式要根据是否处于缩放/拖动状态动态变化。
 function getCanvasCursor() {
   if (selectedBoxIndex.value < 0) return "crosshair";
   if (activeInteraction?.type === "resize") return "nwse-resize";
@@ -1643,6 +1687,7 @@ function getCanvasCursor() {
   return "default";
 }
 
+// 切换帧前如果当前帧有未保存修改，需要先让用户确认，避免误操作导致数据丢失。
 async function switchFrame(index) {
   if (index < 0 || index >= frames.value.length) return;
 
@@ -1656,6 +1701,7 @@ async function switchFrame(index) {
   await loadCurrentFrame();
 }
 
+// 删除单帧时会同步清理后端和前端列表，并尽量保持当前浏览位置不跳动。
 async function deleteFrame(frameName, index) {
   const normalizedFrameName = String(frameName || "").trim();
   if (!sessionId.value || !normalizedFrameName) {
@@ -1726,6 +1772,7 @@ async function deleteFrame(frameName, index) {
   }
 }
 
+// 清空当前会话的全部帧，属于高风险操作，所以前面会加多层确认。
 async function clearFrameList() {
   if (!sessionId.value) {
     alert("请先创建或切换到一个会话");
@@ -1792,6 +1839,7 @@ async function clearFrameList() {
   }
 }
 
+// 保存当前帧标注会把当前框集合提交给后端，同时把前端 unsaved 状态清掉。
 async function saveCurrentFrameAnnotation() {
   if (!sessionId.value || !currentFrame.value) return;
 
@@ -1822,6 +1870,7 @@ async function saveCurrentFrameAnnotation() {
   }
 }
 
+// 类别列表可以单独保存，便于在不重新抽帧的情况下修正类别定义。
 async function saveClassList() {
   if (!sessionId.value) {
     alert("请先上传视频并切帧");
@@ -1854,6 +1903,7 @@ async function saveClassList() {
   }
 }
 
+// 自动标注会把当前会话中的帧交给所选模型推理，并把结果回填为初始框。
 async function runAutoLabel() {
   if (!sessionId.value) {
     alert("请先完成视频上传与切帧");
@@ -1905,6 +1955,7 @@ async function runAutoLabel() {
   }
 }
 
+// 数据集划分会把当前会话内容按训练/验证比例导出，同时更新页面上的结果摘要。
 async function splitDataset() {
   if (!sessionId.value) {
     alert("请先完成标注会话");
@@ -1934,14 +1985,17 @@ async function splitDataset() {
   }
 }
 
+// 帧列表变化时同步分页可见数量，避免当前帧在列表中“消失”。
 watch(frames, () => {
   syncVisibleFrameCount();
 });
 
+// 当前帧索引变化后，确保列表滚动范围足够容纳选中项。
 watch(currentFrameIndex, () => {
   ensureCurrentFrameVisible();
 });
 
+// 只要与缓存相关的关键状态变化，就把最新页面状态持久化下来。
 watch(
   [
     classText,
@@ -1966,6 +2020,7 @@ watch(
   { deep: true },
 );
 
+// 挂载时先恢复本地缓存，再向后端同步模型和历史会话，最后注册全局键鼠事件。
 onMounted(async () => {
   const cached = readAnnotateCache();
   applyCachedSettings(cached);
@@ -1975,6 +2030,7 @@ onMounted(async () => {
   window.addEventListener("mouseup", onWindowMouseUp);
 });
 
+// 卸载前保存一次状态，并移除全局监听，避免页面切换后留下副作用。
 onBeforeUnmount(() => {
   persistAnnotateCache();
   window.removeEventListener("keydown", onWindowKeyDown);
