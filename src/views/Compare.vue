@@ -4,6 +4,7 @@ import * as echarts from "echarts";
 
 import api from "../utils/http";
 
+// 对比页的核心目标是把多模型结果统一到同一张看板里，方便横向比较速度、置信度和综合评分。
 const modelList = ref([]);
 const selectedMap = reactive({});
 const conf = ref(0.35);
@@ -30,9 +31,11 @@ let pieChart;
 
 const chartFont =
   "Microsoft YaHei, PingFang SC, Noto Sans CJK SC, SimHei, sans-serif";
+// 本地缓存键用于保存阈值、设备和已选模型，避免刷新后重新勾选。
 const COMPARE_PAGE_STORAGE_KEY = "compare_page_state_v1";
 const preferredModelIds = ref([]);
 
+// 读取缓存时只接受对象型数据，避免损坏的 localStorage 值影响页面。
 function readCompareCache() {
   if (typeof window === "undefined") {
     return null;
@@ -51,6 +54,7 @@ function readCompareCache() {
   }
 }
 
+// 写缓存只是保存轻量状态，不保存真正的对比结果，结果仍以当前查询为准。
 function writeCompareCache(payload) {
   if (typeof window === "undefined") {
     return;
@@ -66,6 +70,7 @@ function writeCompareCache(payload) {
   }
 }
 
+// 数值字段统一做区间约束，避免阈值滑条或缓存值越界。
 function toBoundedNumber(value, fallback, min, max) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
@@ -74,6 +79,7 @@ function toBoundedNumber(value, fallback, min, max) {
   return Math.max(min, Math.min(max, numeric));
 }
 
+// 从缓存恢复当前对比配置，只恢复可安全回填的字段。
 function applyCompareCache(cached) {
   if (!cached || typeof cached !== "object") {
     return;
@@ -95,6 +101,7 @@ function applyCompareCache(cached) {
   }
 }
 
+// 只要筛选条件变化，就立即把当前状态写回缓存。
 function persistCompareCache() {
   writeCompareCache({
     conf: Number(conf.value),
@@ -104,6 +111,7 @@ function persistCompareCache() {
   });
 }
 
+// 根据后端返回的模型列表同步勾选状态，保证已不存在的模型不会残留在界面里。
 function syncSelectedModels(models) {
   const nextIds = new Set(models.map((item) => item.id));
 
@@ -120,6 +128,7 @@ function syncSelectedModels(models) {
   }
 }
 
+// 初始化时同时拉模型列表和设备信息，既决定下拉框内容，也决定默认运行设备。
 async function loadSystemInfo() {
   const preferredDevice = selectedDevice.value;
 
@@ -160,16 +169,19 @@ async function loadSystemInfo() {
   }
 }
 
+// 上传文件只负责更新待对比样本，真正识别由后面的对比按钮触发。
 function onFileChange(event) {
   mediaFile.value = event.target.files?.[0] || null;
 }
 
+// 从当前勾选状态里提取模型 id 列表，作为后端对比请求的输入。
 function getSelectedModels() {
   return modelList.value
     .filter((item) => selectedMap[item.id])
     .map((item) => item.id);
 }
 
+// ECharts 实例在挂载后一次性初始化，后续只更新 option，不重复创建容器。
 function initCharts() {
   if (speedChartRef.value) speedChart = echarts.init(speedChartRef.value);
   if (countChartRef.value) countChart = echarts.init(countChartRef.value);
@@ -179,6 +191,7 @@ function initCharts() {
   if (pieChartRef.value) pieChart = echarts.init(pieChartRef.value);
 }
 
+// 多个图表共享统一的标题、字体和坐标轴留白配置，减少重复样式定义。
 function baseOption(title) {
   return {
     title: {
@@ -206,6 +219,7 @@ function baseOption(title) {
   };
 }
 
+// 这里把后端返回的每个模型结果拆成多个图表需要的数值序列。
 function renderCharts() {
   const results = compareResults.value;
   if (!results.length) return;
@@ -355,6 +369,7 @@ function renderCharts() {
   });
 }
 
+// 响应窗口大小变化时统一重绘所有图表，防止布局缩放后出现裁切。
 function resizeAllCharts() {
   speedChart?.resize();
   countChart?.resize();
@@ -364,6 +379,7 @@ function resizeAllCharts() {
   pieChart?.resize();
 }
 
+// 发起对比前需要同时具备样本文件和至少一个选中的模型。
 async function compareModels() {
   if (!mediaFile.value) {
     alert("请先上传用于对比的图片或视频");
@@ -397,6 +413,7 @@ async function compareModels() {
   }
 }
 
+// 影响对比阈值和设备的设置变化后，马上保存到本地缓存。
 watch(
   [conf, selectedDevice],
   () => {
@@ -405,6 +422,7 @@ watch(
   { deep: true },
 );
 
+// 模型勾选变化同样写入缓存，刷新后可以直接复原上一次对比选择。
 watch(
   selectedMap,
   () => {
@@ -413,6 +431,7 @@ watch(
   { deep: true },
 );
 
+// 挂载时先恢复缓存，再同步系统信息并初始化图表实例。
 onMounted(async () => {
   const cached = readCompareCache();
   applyCompareCache(cached);
@@ -422,6 +441,7 @@ onMounted(async () => {
   window.addEventListener("resize", resizeAllCharts);
 });
 
+// 卸载前保存状态、移除窗口监听并释放 ECharts 资源。
 onUnmounted(() => {
   persistCompareCache();
   window.removeEventListener("resize", resizeAllCharts);

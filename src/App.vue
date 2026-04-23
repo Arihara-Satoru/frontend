@@ -1,4 +1,5 @@
 <script setup>
+// 侧边栏导航集中放在根组件里，方便切换各个功能页，同时保持统一外壳布局。
 const navItems = [
   { path: "/", title: "识别中心", desc: "图片/视频/实时识别" },
   { path: "/compare", title: "模型对比", desc: "ECharts 中文对比看板" },
@@ -13,6 +14,7 @@ const navItems = [
 </script>
 
 <template>
+  <!-- 根布局负责统一头部、侧边导航和内容区，所有功能页都在 RouterView 中切换。 -->
   <div class="min-h-screen w-full bg-[var(--bg-main)] text-[var(--ink-main)]">
     <header
       class="border-b border-[var(--line-soft)] bg-white/90 backdrop-blur"
@@ -34,10 +36,12 @@ const navItems = [
       </div>
     </header>
 
+    <!-- 主区域采用“左导航 + 右内容”的控制台式布局，适合多功能工具站。 -->
     <main
       class="mx-auto grid w-full max-w-none gap-5 px-4 pb-8 pt-5 sm:px-6 lg:grid-cols-[260px_minmax(0,1fr)] lg:px-8 xl:px-10"
     >
       <aside class="card-panel p-4">
+        <!-- 导航项定义在脚本里，这里只负责渲染和高亮当前页面。 -->
         <h2
           class="mb-3 text-sm font-bold uppercase tracking-[0.12em] text-[var(--ink-sub)]"
         >
@@ -56,6 +60,7 @@ const navItems = [
         </nav>
       </aside>
 
+      <!-- 每个具体页面都从这里插入，App 本身不承担业务逻辑。 -->
       <section class="min-w-0 space-y-5">
         <RouterView />
       </section>

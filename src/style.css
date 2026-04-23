@@ -2,6 +2,7 @@
 @tailwind components;
 @tailwind utilities;
 
+/* 全局设计变量统一放在这里，后续页面只需引用这些颜色和间距语义。 */
 :root {
 	--bg-main: #f3f6f3;
 	--ink-main: #16322b;
@@ -13,10 +14,12 @@
 	--accent: #ff9f43;
 }
 
+/* 基础盒模型统一，避免不同元素的宽高计算出现偏差。 */
 * {
 	box-sizing: border-box;
 }
 
+/* 让根容器撑满整个视口，方便应用级布局控制。 */
 html,
 body,
 #app {
@@ -24,6 +27,7 @@ body,
 	min-height: 100%;
 }
 
+/* 全局字体和背景在这里统一定义，保证所有页面风格一致。 */
 body {
 	font-family: 'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC', 'SimHei', sans-serif;
 	color: var(--ink-main);
@@ -33,6 +37,7 @@ body {
 		var(--bg-main);
 }
 
+/* 把常用卡片、按钮、输入框和状态标签抽成组件类，页面只关注结构和内容。 */
 @layer components {
 	.card-panel {
 		@apply rounded-2xl border bg-white shadow-sm;

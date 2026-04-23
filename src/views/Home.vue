@@ -3,6 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 
 import api from "../utils/http";
 
+// 推理页统一承载图片、视频和摄像头三种识别方式，核心是复用同一套模型与设备选择状态。
 const loadingSystem = ref(false);
 const deviceInfo = ref(null);
 const modelList = ref([]);
@@ -33,10 +34,12 @@ const pollTimer = ref(null);
 const pollBusy = ref(false);
 const lastAlarmAt = ref(0);
 
+// 只展示当前已存在的模型，避免把不可用权重混进下拉框。
 const availableModels = computed(() =>
   modelList.value.filter((item) => item.exists),
 );
 
+// 这是本页本地缓存的存储键，用来恢复模型、设备和阈值设置。
 const HOME_INFERENCE_STORAGE_KEY = "home_inference_state_v1";
 
 function readHomeInferenceCache() {
@@ -69,6 +72,7 @@ function writeHomeInferenceCache(payload) {
     );
   } catch (error) {
     console.warn("写入推理页缓存失败", error);
+    // 从本地缓存回填页面状态时，只接受能通过校验的字段，避免旧配置覆盖当前选择。
   }
 }
 
@@ -99,6 +103,7 @@ function applyHomeInferenceCache(cached) {
   conf.value = toBoundedNumber(cached.conf, conf.value, 0.1, 0.9);
 }
 
+// 页面状态变化后持续写回缓存，刷新页面时可以无感恢复上次设置。
 function persistHomeInferenceCache() {
   writeHomeInferenceCache({
     selectedModel: selectedModel.value,
@@ -108,6 +113,7 @@ function persistHomeInferenceCache() {
   });
 }
 
+// 设备文案只负责把后端返回的设备状态转成人类可读标签。
 const deviceText = computed(() => {
   if (!deviceInfo.value) return "未知设备";
   if (deviceInfo.value.selected_device?.startsWith("cuda")) {
@@ -116,6 +122,7 @@ const deviceText = computed(() => {
   return "CPU";
 });
 
+// 启动时一次性拉取可用设备和模型列表，并把当前选择修正到可用范围内。
 async function loadSystemInfo() {
   loadingSystem.value = true;
   const preferredModel = selectedModel.value;
@@ -158,6 +165,7 @@ async function loadSystemInfo() {
   }
 }
 
+// 文件输入只负责更新响应式状态，真正推理交给后面的按钮逻辑。
 function onImageFileChange(event) {
   imageFile.value = event.target.files?.[0] || null;
   imageResult.value = null;
@@ -170,6 +178,7 @@ function onVideoFileChange(event) {
   videoFinished.value = false;
 }
 
+// 视频和摄像头轮询都依赖定时器，这两个辅助函数负责避免重复创建多个定时器。
 function clearVideoPollingTimer() {
   if (videoPollTimer.value) {
     clearInterval(videoPollTimer.value);
@@ -177,6 +186,7 @@ function clearVideoPollingTimer() {
   }
 }
 
+// 如果当前正在运行视频识别，才允许挂起一个新的轮询任务。
 function ensureVideoPollingTimer() {
   if (videoPollTimer.value || !videoRunning.value) {
     return;
@@ -184,6 +194,7 @@ function ensureVideoPollingTimer() {
   videoPollTimer.value = setInterval(fetchVideoFrame, 260);
 }
 
+// 摄像头轮询同样只保留一个活动定时器，避免状态切换时重复拉帧。
 function clearCameraPollingTimer() {
   if (pollTimer.value) {
     clearInterval(pollTimer.value);
@@ -191,6 +202,7 @@ function clearCameraPollingTimer() {
   }
 }
 
+// 摄像头运行时才启动轮询，和视频模式保持同样的节流逻辑。
 function ensureCameraPollingTimer() {
   if (pollTimer.value || !cameraRunning.value) {
     return;
@@ -198,6 +210,7 @@ function ensureCameraPollingTimer() {
   pollTimer.value = setInterval(fetchCameraFrame, 260);
 }
 
+// 图片识别是一次性请求，结果会直接回填到图像和指标卡片里。
 async function runImageInference() {
   if (!imageFile.value) {
     alert("请先选择图片文件");
@@ -221,6 +234,7 @@ async function runImageInference() {
   }
 }
 
+// 视频识别先启动后端任务，再通过轮询不断取回最新帧。
 async function runVideoInference() {
   if (!videoFile.value) {
     alert("请先选择视频文件");
@@ -251,6 +265,7 @@ async function runVideoInference() {
   }
 }
 
+// 拉取视频帧时要处理“正常更新”和“后端已结束/未启动”这两类状态。
 async function fetchVideoFrame() {
   if (!videoRunning.value || videoPollingBusy.value) {
     return;
@@ -287,6 +302,7 @@ async function fetchVideoFrame() {
   }
 }
 
+// 停止视频识别时既要清理前端定时器，也要通知后端结束任务。
 async function stopVideoInference(silent = false, syncBackend = true) {
   clearVideoPollingTimer();
 
@@ -303,6 +319,7 @@ async function stopVideoInference(silent = false, syncBackend = true) {
   videoRunning.value = false;
 }
 
+// 报警音做了节流，避免连续多帧触发时声音重叠。
 function triggerAlarm(audioUrl) {
   const now = Date.now();
   if (now - lastAlarmAt.value < 1500) {
@@ -316,6 +333,7 @@ function triggerAlarm(audioUrl) {
   });
 }
 
+// 摄像头轮询和视频轮询一致，只是数据源从视频帧接口换成摄像头接口。
 async function fetchCameraFrame() {
   if (!cameraRunning.value || pollBusy.value) {
     return;
@@ -344,6 +362,7 @@ async function fetchCameraFrame() {
   }
 }
 
+// 启动摄像头前先把当前模型、设备和阈值发给后端，确保后端以页面当前选择为准。
 async function startCamera() {
   cameraLoading.value = true;
   try {
@@ -368,6 +387,7 @@ async function startCamera() {
   }
 }
 
+// 停止摄像头时同样清理轮询和后端状态。
 async function stopCamera(silent = false, syncBackend = true) {
   clearCameraPollingTimer();
 
@@ -384,6 +404,7 @@ async function stopCamera(silent = false, syncBackend = true) {
   cameraRunning.value = false;
 }
 
+// 页面切换回来时主动同步一次后端推理状态，防止本地和服务端状态漂移。
 async function syncInferenceRuntimeStatus() {
   try {
     const response = await api.get("/inference/status");
@@ -415,12 +436,14 @@ async function syncInferenceRuntimeStatus() {
   }
 }
 
+// 标签页切回可见时重新同步状态，避免后台任务运行中却显示旧页面状态。
 function handleDocumentVisibilityChange() {
   if (document.visibilityState === "visible") {
     syncInferenceRuntimeStatus();
   }
 }
 
+// 只要模型、设备或阈值变化，就把最新选择保存下来，下一次进入页面可以直接恢复。
 watch(
   [selectedModel, selectedDevice, conf],
   () => {
@@ -429,6 +452,7 @@ watch(
   { deep: true },
 );
 
+// 挂载后先恢复本地缓存，再同步系统与后端运行态，最后注册页面可见性监听。
 onMounted(async () => {
   const cached = readHomeInferenceCache();
   applyHomeInferenceCache(cached);
@@ -436,10 +460,14 @@ onMounted(async () => {
   await syncInferenceRuntimeStatus();
 
   if (typeof document !== "undefined") {
-    document.addEventListener("visibilitychange", handleDocumentVisibilityChange);
+    document.addEventListener(
+      "visibilitychange",
+      handleDocumentVisibilityChange,
+    );
   }
 });
 
+// 卸载前保存状态并清理定时器，避免离开页面后继续占用轮询资源。
 onUnmounted(() => {
   persistHomeInferenceCache();
   clearVideoPollingTimer();

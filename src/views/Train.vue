@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, reactive, ref, watch } from "vue";
 
 import api from "../utils/http";
 
+// 训练页负责把参数表单、后端训练状态和实时日志串起来，前端只做控制台与状态展示。
 const form = reactive({
   data: "",
   model: "ultralytics/cfg/models/v8/yolov8s_CA.yaml",
@@ -18,6 +19,7 @@ const form = reactive({
   inner_iou_ratio: 0.7,
 });
 
+// 本地缓存键用于恢复上次填写的训练参数，避免每次重新输入。
 const TRAIN_FORM_STORAGE_KEY = "train_form_state_v1";
 const TRAIN_NUMERIC_FIELDS = [
   "imgsz",
@@ -27,6 +29,7 @@ const TRAIN_NUMERIC_FIELDS = [
   "inner_iou_ratio",
 ];
 
+// 从 localStorage 恢复训练表单，数值字段会单独转成数字类型。
 function readTrainFormCache() {
   if (typeof window === "undefined") {
     return null;
@@ -45,6 +48,7 @@ function readTrainFormCache() {
   }
 }
 
+// 写缓存只保存表单与当前状态，不保存日志本身，避免 localStorage 过大。
 function writeTrainFormCache(payload) {
   if (typeof window === "undefined") {
     return;
@@ -60,6 +64,7 @@ function writeTrainFormCache(payload) {
   }
 }
 
+// 用缓存回填表单字段时，只接受已知字段和可转成数字的值。
 function applyCachedTrainForm() {
   const cached = readTrainFormCache();
   if (!cached) {
@@ -83,6 +88,7 @@ function applyCachedTrainForm() {
   }
 }
 
+// 表单变化后持续写缓存，刷新后仍能恢复最近一次训练配置。
 function persistTrainForm() {
   writeTrainFormCache({
     ...form,
@@ -90,6 +96,7 @@ function persistTrainForm() {
   });
 }
 
+// 参数提示统一放在一个对象里，模板只负责展示，不把说明文字散落到各处。
 const paramTips = {
   data: "训练数据集配置文件路径（YAML），需包含 train/val 路径和类别信息。",
   model: "模型结构配置或模型定义路径，例如 YOLOv8 结构配置文件。",
@@ -105,6 +112,7 @@ const paramTips = {
   name: "本次训练实验名称，将作为 project 下的子目录。",
 };
 
+// 这些状态对应训练任务是否在后端运行，以及日志轮询是否处于活跃状态。
 const running = ref(false);
 const status = ref("idle");
 const startedAt = ref("");
@@ -120,6 +128,7 @@ const loadingTrainingDevices = ref(false);
 
 let pollTimer = null;
 
+// 先从后端拉默认训练参数，后续再用缓存覆盖用户上次输入的自定义内容。
 async function loadDefaults() {
   try {
     const response = await api.get("/train/defaults");
@@ -129,6 +138,7 @@ async function loadDefaults() {
   }
 }
 
+// 可训练设备由后端决定，前端只负责把它们渲染成下拉选项。
 async function loadTrainingDevices() {
   loadingTrainingDevices.value = true;
   try {
@@ -159,6 +169,7 @@ async function loadTrainingDevices() {
   }
 }
 
+// 轮询训练状态用于刷新任务状态、命令和日志尾部。
 async function refreshStatus() {
   try {
     const response = await api.get("/train/status");
@@ -176,6 +187,7 @@ async function refreshStatus() {
   }
 }
 
+// 启动训练前至少需要填写数据集配置，其他参数走表单默认值即可。
 async function startTraining() {
   if (!form.data) {
     alert("请填写数据集 YAML 路径 (data)");
@@ -193,6 +205,7 @@ async function startTraining() {
   }
 }
 
+// 停止训练对应后端的中断请求，前端只负责同步最新状态。
 async function stopTraining() {
   stopLoading.value = true;
   try {
@@ -205,6 +218,7 @@ async function stopTraining() {
   }
 }
 
+// 表单任何字段变化都应该落盘一次，避免刷新后丢参。
 watch(
   form,
   () => {
@@ -213,6 +227,7 @@ watch(
   { deep: true },
 );
 
+// 挂载后按“默认值 -> 缓存 -> 设备 -> 状态”的顺序初始化。
 onMounted(async () => {
   await loadDefaults();
   applyCachedTrainForm();
@@ -221,6 +236,7 @@ onMounted(async () => {
   pollTimer = setInterval(refreshStatus, 2000);
 });
 
+// 卸载前保存表单并停止轮询，避免页面离开后继续请求后端。
 onUnmounted(() => {
   persistTrainForm();
   if (pollTimer) {

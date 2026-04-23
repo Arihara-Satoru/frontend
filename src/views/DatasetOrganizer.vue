@@ -60,6 +60,7 @@ const detectedConvertibleCount = computed(
   () => visibleSourceItems.value.filter((item) => item.convertible).length,
 );
 
+// 数据集整理页用缓存保存目录和转换参数，便于反复调整时保留输入内容。
 function readCache() {
   if (typeof window === "undefined") {
     return null;
@@ -78,6 +79,7 @@ function readCache() {
   }
 }
 
+// 写缓存只保存配置和最近结果，不保存临时扫描列表。
 function writeCache(payload) {
   if (typeof window === "undefined") {
     return;
@@ -93,6 +95,7 @@ function writeCache(payload) {
   }
 }
 
+// 数值型参数统一做上下界处理，避免 seed 和比例出现非法值。
 function toBoundedNumber(value, fallback, min, max) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) {
@@ -179,6 +182,7 @@ function applyCache(cached) {
   }
 }
 
+// 页面任何输入变化都会同步到缓存，确保用户能继续上一次的整理配置。
 function persistCache() {
   writeCache({
     ...form,
@@ -188,6 +192,7 @@ function persistCache() {
   });
 }
 
+// 多行输入统一拆分成干净的字符串数组，适合文件列表、类别列表和 splits 配置。
 function normalizeMultilineInput(rawText) {
   return String(rawText || "")
     .split(/[,\n\r;]+/)
@@ -195,6 +200,7 @@ function normalizeMultilineInput(rawText) {
     .filter(Boolean);
 }
 
+// 点击扫描结果时，自动把目录路径、格式和 COCO 标注文件带入下方表单。
 function fillSource(item) {
   form.sourcePath = item.path || item.relative_path || "";
   if (item.detected_format && item.detected_format !== "unknown") {
@@ -209,6 +215,7 @@ function fillSource(item) {
   }
 }
 
+// 默认参数由后端返回，前端只在当前值还是初始默认时才用它覆盖。
 async function loadDefaults() {
   loadingDefaults.value = true;
   try {
@@ -261,6 +268,7 @@ async function loadDefaults() {
   }
 }
 
+// 扫描源目录用于发现可转换的数据集结构，结果会直接显示在页面卡片里。
 async function scanSources() {
   if (!form.scanRoot.trim()) {
     alert("请先填写扫描目录");
@@ -280,6 +288,7 @@ async function scanSources() {
   }
 }
 
+// 转换历史来自后端持久化记录，方便回看上一次整理过什么目录。
 async function loadHistory() {
   loadingHistory.value = true;
   try {
@@ -292,6 +301,7 @@ async function loadHistory() {
   }
 }
 
+// 清空历史只删除记录，不删除已生成的数据集文件。
 async function clearHistory() {
   const ok = window.confirm(
     "确定清空转换历史吗？该操作只清空历史记录，不会删除已转换数据集。",
@@ -311,6 +321,7 @@ async function clearHistory() {
   }
 }
 
+// 数据集转换请求会把所有目录与格式参数统一发给后端执行。
 async function convertDataset() {
   if (!form.sourcePath.trim()) {
     alert("请先填写源数据集目录");
@@ -353,6 +364,7 @@ async function convertDataset() {
   }
 }
 
+// 交通子集提取是从既有 YOLO 数据中筛出车辆相关类别并重新组织目录结构。
 async function extractTrafficSubset() {
   if (!form.trafficSourcePath.trim()) {
     alert("请先填写交通子集源目录");
@@ -384,6 +396,7 @@ async function extractTrafficSubset() {
   }
 }
 
+// 表单和结果变更都会落到缓存里，刷新后依然保留最近一次整理配置。
 watch(
   form,
   () => {
@@ -392,14 +405,17 @@ watch(
   { deep: true },
 );
 
+// 最近的转换结果也要保存，这样回来时不用重新扫目录。
 watch(convertResult, () => {
   persistCache();
 });
 
+// 最近一次交通子集结果同样写回缓存，方便查看和继续操作。
 watch(trafficResult, () => {
   persistCache();
 });
 
+// 挂载时按“恢复缓存 -> 加载默认参数 -> 历史记录”的顺序初始化。
 onMounted(async () => {
   applyCache(readCache());
   await loadDefaults();
