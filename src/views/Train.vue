@@ -110,7 +110,8 @@ function persistTrainForm() {
 const paramTips = {
   data: "训练数据集配置文件路径（YAML），需包含 train/val 路径和类别信息。",
   mode: "训练模式。微调模式会展开更细的策略配置；从头训练会忽略 weights。",
-  fine_tune_strategy: "微调策略。不同策略会显示不同的可填参数，并自动回填推荐值。",
+  fine_tune_strategy:
+    "微调策略。不同策略会显示不同的可填参数，并自动回填推荐值。",
   model: "模型结构配置或模型定义路径，例如 YOLOv8 结构配置文件。",
   weights: "预训练权重文件路径；微调模式会加载该项，从头训练时会忽略。",
   device: "训练设备。GPU 使用编号（如 0、1），CPU 使用 cpu。",
@@ -119,7 +120,8 @@ const paramTips = {
   batch: "每次迭代的样本数，受显存限制；过大可能导致显存不足。",
   workers: "数据加载线程数，适当增大可提升数据读取速度。",
   inner_iou_ratio: "Inner-IoU 比例系数，用于你当前自定义损失设定。",
-  freeze_layers: "冻结层数，数值越大表示冻结的网络越多；适合冻结骨干或只训检测头。",
+  freeze_layers:
+    "冻结层数，数值越大表示冻结的网络越多；适合冻结骨干或只训检测头。",
   lr0: "初始学习率。微调时通常比从头训练更小，避免破坏已有特征。",
   lrf: "最终学习率比例，决定后期学习率衰减到初始值的多少倍。",
   warmup_epochs: "预热轮数，适当预热可以让微调初期更稳定。",
@@ -146,21 +148,25 @@ const fineTuneStrategyOptions = [
     value: "full",
     label: "全量微调",
     description: "保留预训练权重，全部参数参与更新。",
+    badge: "通用推荐",
   },
   {
     value: "freeze_backbone",
     label: "冻结骨干",
     description: "冻结前部特征提取层，只训练后部与检测头。",
+    badge: "稳妥微调",
   },
   {
     value: "head_only",
     label: "只训检测头",
     description: "冻结更多层，仅让检测头参与更新。",
+    badge: "快速适配",
   },
   {
     value: "low_lr",
     label: "低学习率微调",
     description: "不冻结层，但使用更低的学习率进行轻量适配。",
+    badge: "低扰动",
   },
 ];
 
@@ -177,7 +183,16 @@ const selectedFineTuneStrategy = computed(
     ) || fineTuneStrategyOptions[0],
 );
 
+const fineTuneStrategyCards = computed(() =>
+  fineTuneStrategyOptions.map((item) => ({
+    ...item,
+    preset: fineTunePresets[item.value] || fineTunePresets.full,
+    selected: item.value === form.fine_tune_strategy,
+  })),
+);
+
 const isFineTuneMode = computed(() => form.mode === "fine_tune");
+const isScratchMode = computed(() => form.mode === "scratch");
 const shouldShowFreezeLayers = computed(() =>
   ["freeze_backbone", "head_only"].includes(form.fine_tune_strategy),
 );
@@ -425,25 +440,56 @@ onUnmounted(() => {
       <div>
         <label class="field-label" :title="paramTips.model">model</label>
         <input v-model="form.model" class="field-input" />
+        <div class="mt-1 text-xs text-[var(--ink-sub)]">
+          {{
+            isScratchMode
+              ? "从头训练只使用模型结构，不加载预训练权重。"
+              : "微调时会结合模型结构和预训练权重。"
+          }}
+        </div>
       </div>
-      <div>
+      <div v-if="isFineTuneMode">
         <label class="field-label" :title="paramTips.weights">weights</label>
         <input
           v-model="form.weights"
           class="field-input"
-          :disabled="form.mode === 'scratch'"
+          placeholder="例如: yolov8s.pt"
         />
+        <div class="mt-1 text-xs text-[var(--ink-sub)]">
+          微调模式会加载该权重作为初始化参数。
+        </div>
       </div>
 
-      <div v-if="isFineTuneMode" class="md:col-span-3 rounded-2xl border border-[var(--line-soft)] bg-white p-4">
-        <div class="text-sm font-semibold text-[var(--text-strong)]">微调策略</div>
+      <div
+        v-else
+        class="rounded-2xl border border-dashed border-[var(--line-soft)] bg-[#f8fbfa] p-4 text-xs text-[var(--ink-sub)]"
+      >
+        从头训练不使用权重字段，系统会只保留 model 作为网络结构配置。
+      </div>
+
+      <div
+        v-if="isFineTuneMode"
+        class="md:col-span-3 rounded-2xl border border-[var(--line-soft)] bg-white p-4"
+      >
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div class="text-sm font-semibold text-[var(--text-strong)]">
+            微调策略
+          </div>
+          <div
+            class="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[11px] font-semibold text-emerald-700"
+          >
+            当前：{{ selectedFineTuneStrategy.label }}
+          </div>
+        </div>
         <div class="mt-1 text-xs text-[var(--ink-sub)]">
           {{ selectedFineTuneStrategy.description }}
         </div>
 
         <div class="mt-3 grid gap-3 md:grid-cols-2">
           <div class="md:col-span-2">
-            <label class="field-label" :title="paramTips.fine_tune_strategy">fine_tune_strategy</label>
+            <label class="field-label" :title="paramTips.fine_tune_strategy"
+              >fine_tune_strategy</label
+            >
             <select v-model="form.fine_tune_strategy" class="field-input">
               <option
                 v-for="item in fineTuneStrategyOptions"
@@ -456,7 +502,9 @@ onUnmounted(() => {
           </div>
 
           <div v-if="shouldShowFreezeLayers">
-            <label class="field-label" :title="paramTips.freeze_layers">freeze_layers</label>
+            <label class="field-label" :title="paramTips.freeze_layers"
+              >freeze_layers</label
+            >
             <input
               v-model.number="form.freeze_layers"
               type="number"
@@ -489,7 +537,9 @@ onUnmounted(() => {
           </div>
 
           <div>
-            <label class="field-label" :title="paramTips.warmup_epochs">warmup_epochs</label>
+            <label class="field-label" :title="paramTips.warmup_epochs"
+              >warmup_epochs</label
+            >
             <input
               v-model.number="form.warmup_epochs"
               type="number"
@@ -503,6 +553,50 @@ onUnmounted(() => {
             切换策略后会回填对应推荐值，你可以在这里继续微调冻结层数和学习率。
           </div>
         </div>
+
+        <!-- <div class="mt-4 grid gap-3 lg:grid-cols-2">
+          <div
+            v-for="card in fineTuneStrategyCards"
+            :key="card.value"
+            class="rounded-2xl border p-3 transition"
+            :class="
+              card.selected
+                ? 'border-emerald-300 bg-emerald-50'
+                : 'border-[var(--line-soft)] bg-[#f8fbfa]'
+            "
+          >
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div class="text-sm font-semibold text-[var(--text-strong)]">
+                {{ card.label }}
+              </div>
+              <span
+                class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                :class="
+                  card.selected
+                    ? 'bg-emerald-600 text-white'
+                    : 'bg-white text-[var(--ink-sub)]'
+                "
+              >
+                {{ card.badge }}
+              </span>
+            </div>
+            <div class="mt-1 text-xs text-[var(--ink-sub)]">
+              {{ card.description }}
+            </div>
+            <div
+              class="mt-3 grid grid-cols-2 gap-2 text-[11px] text-[var(--ink-main)]"
+            >
+              <div class="metric-chip">
+                冻结层: {{ card.preset.freeze_layers }}
+              </div>
+              <div class="metric-chip">lr0: {{ card.preset.lr0 }}</div>
+              <div class="metric-chip">lrf: {{ card.preset.lrf }}</div>
+              <div class="metric-chip">
+                warmup: {{ card.preset.warmup_epochs }}
+              </div>
+            </div>
+          </div>
+        </div> -->
       </div>
 
       <div>

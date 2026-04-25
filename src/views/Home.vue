@@ -11,6 +11,8 @@ const modelList = ref([]);
 const selectedModel = ref("yolov8n");
 const selectedDevice = ref("auto");
 const conf = ref(0.35);
+const cameraFovDeg = ref(70.0);
+const frontVehicleWidthM = ref(1.4);
 
 const imageFile = ref(null);
 const imageResult = ref(null);
@@ -94,6 +96,70 @@ function toBoundedNumber(value, fallback, min, max) {
   return Math.max(min, Math.min(max, numeric));
 }
 
+function normalizeCalibrationState() {
+  cameraFovDeg.value = toBoundedNumber(cameraFovDeg.value, 70.0, 30.0, 170.0);
+  frontVehicleWidthM.value = toBoundedNumber(
+    frontVehicleWidthM.value,
+    1.4,
+    0.5,
+    5.0,
+  );
+}
+
+function buildCalibrationPayload() {
+  normalizeCalibrationState();
+  return {
+    camera_fov_deg: cameraFovDeg.value,
+    front_vehicle_width_m: frontVehicleWidthM.value,
+  };
+}
+
+function resetCalibrationParams() {
+  cameraFovDeg.value = 70.0;
+  frontVehicleWidthM.value = 1.4;
+}
+
+function smoothNumericValue(previous, next, alpha) {
+  const nextNumber = Number(next);
+  if (!Number.isFinite(nextNumber)) {
+    return next ?? null;
+  }
+
+  const previousNumber = Number(previous);
+  if (!Number.isFinite(previousNumber)) {
+    return Number(nextNumber.toFixed(2));
+  }
+
+  return Number(
+    (previousNumber + (nextNumber - previousNumber) * alpha).toFixed(2),
+  );
+}
+
+function smoothRealtimeMetrics(previous, next) {
+  if (!next || typeof next !== "object") {
+    return null;
+  }
+
+  if (!previous || typeof previous !== "object") {
+    return { ...next };
+  }
+
+  return {
+    ...next,
+    distance_m: smoothNumericValue(previous.distance_m, next.distance_m, 0.22),
+    relative_speed_mps: smoothNumericValue(
+      previous.relative_speed_mps,
+      next.relative_speed_mps,
+      0.18,
+    ),
+    ttc_seconds: smoothNumericValue(
+      previous.ttc_seconds,
+      next.ttc_seconds,
+      0.18,
+    ),
+  };
+}
+
 function applyHomeInferenceCache(cached) {
   if (!cached || typeof cached !== "object") {
     return;
@@ -111,6 +177,18 @@ function applyHomeInferenceCache(cached) {
   }
 
   conf.value = toBoundedNumber(cached.conf, conf.value, 0.1, 0.9);
+  cameraFovDeg.value = toBoundedNumber(
+    cached.cameraFovDeg,
+    cameraFovDeg.value,
+    30.0,
+    170.0,
+  );
+  frontVehicleWidthM.value = toBoundedNumber(
+    cached.frontVehicleWidthM,
+    frontVehicleWidthM.value,
+    0.5,
+    5.0,
+  );
 }
 
 // 页面状态变化后持续写回缓存，刷新页面时可以无感恢复上次设置。
@@ -119,6 +197,8 @@ function persistHomeInferenceCache() {
     selectedModel: selectedModel.value,
     selectedDevice: selectedDevice.value,
     conf: Number(conf.value),
+    cameraFovDeg: Number(cameraFovDeg.value),
+    frontVehicleWidthM: Number(frontVehicleWidthM.value),
     savedAt: Date.now(),
   });
 }
@@ -243,10 +323,16 @@ async function runImageInference() {
   const requestStartedAt = performance.now();
   try {
     const form = new FormData();
+    const calibration = buildCalibrationPayload();
     form.append("file", imageFile.value);
     form.append("model_name", selectedModel.value);
     form.append("conf", String(conf.value));
     form.append("device", effectiveSelectedDevice.value);
+    form.append("camera_fov_deg", String(calibration.camera_fov_deg));
+    form.append(
+      "front_vehicle_width_m",
+      String(calibration.front_vehicle_width_m),
+    );
 
     const response = await api.post("/inference/image", form);
     imageResult.value = response.data.data;
@@ -285,10 +371,16 @@ async function runVideoInference() {
   videoLoading.value = true;
   try {
     const form = new FormData();
+    const calibration = buildCalibrationPayload();
     form.append("file", videoFile.value);
     form.append("model_name", selectedModel.value);
     form.append("conf", String(conf.value));
     form.append("device", effectiveSelectedDevice.value);
+    form.append("camera_fov_deg", String(calibration.camera_fov_deg));
+    form.append(
+      "front_vehicle_width_m",
+      String(calibration.front_vehicle_width_m),
+    );
 
     await api.post("/inference/video/start", form);
     videoRunning.value = true;
@@ -317,7 +409,10 @@ async function fetchVideoFrame() {
     const response = await api.get("/inference/video/frame");
     const payload = response.data.data;
     videoFrame.value = payload.frame;
-    videoMetrics.value = payload.metrics;
+    videoMetrics.value = smoothRealtimeMetrics(
+      videoMetrics.value,
+      payload.metrics,
+    );
 
     if (payload.metrics?.alarm) {
       triggerAlarm(payload.alarm_audio_url);
@@ -385,7 +480,10 @@ async function fetchCameraFrame() {
     const response = await api.get("/inference/camera/frame");
     const payload = response.data.data;
     cameraFrame.value = payload.frame;
-    cameraMetrics.value = payload.metrics;
+    cameraMetrics.value = smoothRealtimeMetrics(
+      cameraMetrics.value,
+      payload.metrics,
+    );
 
     if (payload.metrics?.alarm) {
       triggerAlarm(payload.alarm_audio_url);
@@ -412,6 +510,7 @@ async function startCamera() {
       model_name: selectedModel.value,
       conf: conf.value,
       device: effectiveSelectedDevice.value,
+      ...buildCalibrationPayload(),
     });
 
     cameraRunning.value = true;
@@ -486,7 +585,7 @@ function handleDocumentVisibilityChange() {
 
 // 只要模型、设备或阈值变化，就把最新选择保存下来，下一次进入页面可以直接恢复。
 watch(
-  [selectedModel, selectedDevice, conf],
+  [selectedModel, selectedDevice, conf, cameraFovDeg, frontVehicleWidthM],
   () => {
     persistHomeInferenceCache();
   },
@@ -591,6 +690,55 @@ onUnmounted(() => {
         >
           {{ loadingSystem ? "加载中..." : "刷新设备与模型" }}
         </button>
+      </div>
+    </div>
+
+    <div
+      class="mt-4 rounded-2xl border border-[var(--line-soft)] bg-white/80 p-4"
+    >
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div class="text-sm font-semibold text-[var(--text-strong)]">
+            相机标定参数
+          </div>
+          <div class="mt-1 text-xs text-[var(--text-muted)]">
+            用于前车距离/TTC 估算，支持你手动填写自己的相机参数。
+          </div>
+        </div>
+        <button
+          class="btn-secondary px-3 py-2 text-sm"
+          @click="resetCalibrationParams"
+        >
+          恢复默认
+        </button>
+      </div>
+
+      <div class="mt-4 grid gap-3 md:grid-cols-2">
+        <div>
+          <label class="field-label">相机视场角 FOV (度)</label>
+          <input
+            v-model.number="cameraFovDeg"
+            type="number"
+            min="30"
+            max="170"
+            step="0.1"
+            class="field-input"
+            placeholder="例如 70"
+          />
+        </div>
+
+        <div>
+          <label class="field-label">前车参考宽度 (米)</label>
+          <input
+            v-model.number="frontVehicleWidthM"
+            type="number"
+            min="0.5"
+            max="5"
+            step="0.01"
+            class="field-input"
+            placeholder="例如 1.4"
+          />
+        </div>
       </div>
     </div>
   </div>
